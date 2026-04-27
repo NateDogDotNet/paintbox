@@ -165,6 +165,32 @@ export class PaintboxEditorProvider
                         `Paintbox: ${String(msg.error || 'unknown error')} (${document.uri.toString()})`
                     );
                     return;
+                case 'saveResult': {
+                    // Phase 4 — log only. Phase 5 wires this to
+                    // vscode.workspace.fs.writeFile via a pending-save promise.
+                    // First-8-bytes hex helps a developer eyeball-confirm a
+                    // PNG (89 50 4e 47 0d 0a 1a 0a) or JPEG (ff d8 ff e0)
+                    // without firing up a hex editor.
+                    const bytes = Array.isArray(msg.bytes) ? (msg.bytes as number[]) : [];
+                    const first8 = bytes.length > 0
+                        ? bytes.slice(0, 8).map((b) => (b & 0xff).toString(16).padStart(2, '0')).join(' ')
+                        : '(none)';
+                    console.log('[paintbox] saveResult received', {
+                        format: msg.format,
+                        filename: msg.filename,
+                        mime: msg.mime,
+                        bytes_length: bytes.length,
+                        first_8_bytes: first8,
+                    });
+                    return;
+                }
+                case 'saveError':
+                    // Phase 4 — log only. Phase 5 may surface to the user.
+                    console.error('[paintbox] saveError received', {
+                        error: String(msg.error || 'unknown error'),
+                        filename: msg.filename,
+                    });
+                    return;
             }
         });
 

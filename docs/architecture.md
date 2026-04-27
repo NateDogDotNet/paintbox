@@ -101,8 +101,46 @@ works but adds complexity.
 
 ### miniPaint save hook surface
 
-`File_save_class` in `vendor/minipaint/src/js/modules/file/save.js` is the
-interception point. The webview wrapper needs to intercept the save action before
-miniPaint writes to the browser's download stream and redirect the output bytes to
-`postMessage`. The class is a singleton with a `set_events()` initializer and a
-`SAVE_TYPES` map (PNG/JPG/etc.) — confirmed against v4.14.3.
+Phase 4 audit conclusion: `vendor/minipaint/src/js/modules/file/save.js` is
+NOT loaded at runtime — `vendor/minipaint/index.html` only loads
+`dist/bundle.js`, a single 1.36 MB webpack production build that already
+includes a minified copy of the source. Source-only patches would be dead
+text. Strategy used:
+
+1. **Bundle text-replace (load-bearing).** At build time
+   (`scripts/patch-bundle.js` → `src/patchMinipaintBundle.ts`, chained from
+   `npm run compile`), `vendor/minipaint/dist/bundle.js` is read, its 8
+   `p().saveAs(` call sites are rewritten to
+   `((typeof window!=="undefined"&&window.__pbBridge)||p()).saveAs(`, and
+   the result is written to `out/webview/minipaint-bundle.patched.js`.
+   `vendor/minipaint/dist/bundle.js` itself stays byte-identical to upstream
+   v4.14.3 (verifiable via `sha256sum`); the patched output ships in the
+   VSIX. An integrity check throws if the call-site count is not exactly 8,
+   so an upstream bump that silently changes the surface fails loud at
+   build time.
+2. **Source paperwork patch.** `vendor/minipaint/src/js/modules/file/save.js`
+   has its `filesaver` import wrapped with a `__pbBridge`-aware shim,
+   bracketed by `// PAINTBOX-PATCH-BEGIN` / `// PAINTBOX-PATCH-END` markers
+   for diff visibility. NOT load-bearing at runtime, but if a future
+   upstream bump triggers a full miniPaint rebuild via `npm run build`, the
+   resulting bundle is already paintbox-friendly.
+3. **Shim-side bridge.** `src/webview/shim.ts` installs
+   `window.__pbBridge.saveAs(blob, fname)` synchronously inside its IIFE.
+   The bridge marshals the blob to a byte array (`Array.from(new
+   Uint8Array(buf))`) and posts `{type:'saveResult', bytes, format,
+   filename, mime}` back to the host via the closure-captured `vscode`
+   handle from `acquireVsCodeApi()` (single call site preserved). The
+   shim `<script>` is injected immediately BEFORE the patched-bundle
+   `<script>` in the webview HTML so `__pbBridge` is defined before any
+   keyboard binding fires.
+4. **Activation-time verification.** `activate()` calls
+   `verifyPatchedBundle(extensionPath)` BEFORE registering the editor
+   provider. If the artifact is missing, has the wrong header, or has the
+   wrong call-site count, the activation throws — the editor is never
+   registered, and the user sees "Activating extension 'paintbox' failed:
+   Paintbox: patched miniPaint bundle missing or corrupt. Run `npm run
+   compile` to regenerate."
+
+`File_save_class` is a singleton with a `set_events()` initializer and a
+`SAVE_TYPES` map (PNG/JPG/JSON/WEBP/GIF/BMP/TIFF, plus a commented-out
+AVIF) — confirmed against v4.14.3.

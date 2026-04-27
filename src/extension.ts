@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { PaintboxEditorProvider } from './editorProvider';
+import { verifyPatchedBundle } from './patchMinipaintBundle';
 
 /**
  * Extension entry point.
@@ -14,8 +15,15 @@ import { PaintboxEditorProvider } from './editorProvider';
  *   Phase 7 — package + publish to Open VSX
  */
 export function activate(context: vscode.ExtensionContext): void {
-    // TODO (Phase 2): Wire through the ExtensionContext so editorProvider
-    // can resolve the miniPaint HTML path and set up the webview.
+    // Phase 4 (per .orchestrator/phase4-design.md §2c + override Q1):
+    // verify the patched miniPaint bundle artifact exists and is intact.
+    // The patch runs at build time only (scripts/patch-bundle.js), so any
+    // failure here means the VSIX shipped without the artifact OR a local
+    // checkout never ran `npm run compile`. Throw before registering the
+    // provider — the user sees "Activating extension 'paintbox' failed:
+    // Paintbox: patched miniPaint bundle missing or corrupt …".
+    verifyPatchedBundle(context.extensionPath);
+
     const provider = PaintboxEditorProvider.register(context);
     context.subscriptions.push(provider);
 

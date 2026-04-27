@@ -4,8 +4,12 @@
 //   Phase 3 — bridge host ↔ miniPaint for the OPEN side of the round-trip.
 //   The host posts {type:'load', dataUrl, filename, mime}; this shim hands the
 //   data-URL to miniPaint's File_open API and reports back ready/loadError.
+//   Phase 4 — install window.__pbBridge.saveAs(blob, fname) BEFORE the bundle
+//   runs. The patched bundle's `(window.__pbBridge||p()).saveAs(...)` call
+//   sites then route bytes via postMessage instead of triggering a browser
+//   download. See .orchestrator/phase4-design.md §5.
 //
-// Design contract: see .orchestrator/phase3-design.md §6.
+// Design contract: see .orchestrator/phase3-design.md §6 + phase4-design.md §5.
 //
 // IMPORTANT — build constraints:
 //   This file compiles via tsconfig.webview.json (module:"none", target:"ES2020").
@@ -36,7 +40,78 @@ interface LoadMessage {
 type HostMessage = LoadMessage | { type: string; [k: string]: unknown };
 
 (function pbShim(): void {
-    const vscode = acquireVsCodeApi();
+    // Phase 4 §8 Test 4a test seam: allow tests to inject a fake vscode handle
+    // before the shim's IIFE runs (by setting `window.__pbTestVsCode`).
+    // Production code never sets this global, so production behavior is
+    // identical to the prior `acquireVsCodeApi()`-only call. The test seam
+    // keeps a single call site for `acquireVsCodeApi` (Phase 3 carry-over §1).
+    const vscode = (window as unknown as {
+        __pbTestVsCode?: ReturnType<typeof acquireVsCodeApi>;
+    }).__pbTestVsCode || acquireVsCodeApi();
+
+    // Phase 4 — bridge for miniPaint's filesaver.saveAs intercept (§5).
+    // Defined synchronously inside the IIFE so window.__pbBridge is present
+    // before the bundle's `set_events()` keyboard binding fires.
+    interface PbBridge {
+        saveAs: (blob: Blob, fname: string) => void;
+    }
+    const MIME_BY_EXT: { [k: string]: string } = {
+        'png': 'image/png',
+        'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
+        'webp': 'image/webp',
+        'bmp': 'image/bmp',
+        'gif': 'image/gif',
+        // Phase 4 forwards these even though they're not in package.json's
+        // declared selectors. Phase 5 enforces the policy.
+        'tiff': 'image/tiff', 'avif': 'image/avif', 'json': 'application/json',
+    };
+    function deriveMimeFromBlob(blob: Blob, fname: string): string {
+        if (blob.type) return blob.type;
+        const dot = fname.lastIndexOf('.');
+        if (dot < 0) return 'application/octet-stream';
+        const ext = fname.slice(dot + 1).toLowerCase();
+        return MIME_BY_EXT[ext] || 'application/octet-stream';
+    }
+    function deriveFormatFromFilename(fname: string): string {
+        const dot = fname.lastIndexOf('.');
+        if (dot < 0) return 'UNKNOWN';
+        const ext = fname.slice(dot + 1).toLowerCase();
+        if (ext === 'jpg' || ext === 'jpeg') return 'JPG';
+        return ext.toUpperCase();
+    }
+    const pbBridge: PbBridge = {
+        saveAs(blob: Blob, fname: string): void {
+            const mime = deriveMimeFromBlob(blob, fname);
+            const format = deriveFormatFromFilename(fname);
+            try {
+                // eslint-disable-next-line no-console
+                console.log('[paintbox] saveResult dispatch', {
+                    fname: fname, format: format, mime: mime, size: blob.size,
+                });
+            } catch {
+                // logging is best-effort; never block the save path
+            }
+            blob.arrayBuffer().then(
+                (buf) => {
+                    vscode.postMessage({
+                        type: 'saveResult',
+                        bytes: Array.from(new Uint8Array(buf)),
+                        format: format,
+                        filename: fname,
+                        mime: mime,
+                    });
+                },
+                (err: unknown) => {
+                    vscode.postMessage({
+                        type: 'saveError',
+                        error: err instanceof Error ? err.message : String(err),
+                        filename: fname,
+                    });
+                }
+            );
+        },
+    };
+    (window as unknown as { __pbBridge: PbBridge }).__pbBridge = pbBridge;
 
     type State = 'loading' | 'ready' | 'error';
     interface SetStatePayload {

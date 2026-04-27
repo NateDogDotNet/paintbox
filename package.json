@@ -43,7 +43,7 @@
     ]
   },
   "scripts": {
-    "compile": "tsc -p ./ && tsc -p tsconfig.webview.json",
+    "compile": "tsc -p ./ && tsc -p tsconfig.webview.json && node scripts/patch-bundle.js",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src",
     "pretest": "npm run compile",

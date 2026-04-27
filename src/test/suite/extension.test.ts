@@ -117,11 +117,17 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
             'expected CSP meta with cspSource in script-src'
         );
 
-        // Bundle script tag (relative to base href, so `dist/bundle.js`).
+        // Phase 4: the upstream `<script src="dist/bundle.js">` is rewritten
+        // to point at the paintbox-patched bundle (out/webview/...).
         assert.match(
             html,
+            /<script src="https:\/\/fake-webview\.test[^"]*\/out\/webview\/minipaint-bundle\.patched\.js"/,
+            'expected patched bundle <script src> via asWebviewUri'
+        );
+        assert.doesNotMatch(
+            html,
             /<script src="dist\/bundle\.js"/,
-            'expected miniPaint bundle <script src="dist/bundle.js">'
+            'upstream `<script src="dist/bundle.js">` should be rewritten in Phase 4'
         );
 
         // Shim script tag (rewritten via asWebviewUri to a fake-webview URL).
@@ -241,6 +247,64 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
     });
 
     // ---------- Test 3c: real round-trip (demotable per Q5) ---------------
+
+    // ---------- Test 4c: activation-time bundle integrity check ----------
+
+    test('4c — activation verifies the patched miniPaint bundle artifact', async () => {
+        // Phase 4 contract (.orchestrator/phase4-design.md §8 + override Q1):
+        // activate() calls verifyPatchedBundle(extensionPath); it MUST throw
+        // if the artifact is missing or corrupt. The artifact is generated
+        // by `npm run compile` (chained via scripts/patch-bundle.js).
+        //
+        // pretest runs `npm run compile`, so by the time this test runs the
+        // artifact is present and the extension activated cleanly. We assert
+        // the file system invariants directly.
+
+        const repoRoot = path.resolve(__dirname, '../../..');
+        const patchedPath = path.join(repoRoot, 'out', 'webview', 'minipaint-bundle.patched.js');
+
+        assert.ok(
+            fs.existsSync(patchedPath),
+            `expected patched bundle artifact at ${patchedPath}`
+        );
+        const stat = fs.statSync(patchedPath);
+        assert.ok(stat.size > 0, 'patched bundle artifact is empty');
+
+        const contents = fs.readFileSync(patchedPath, 'utf8');
+        const firstLine = contents.split('\n', 1)[0];
+        assert.strictEqual(
+            firstLine,
+            '/* PAINTBOX-BUNDLE-PATCH v1: p\\(\\)\\.saveAs\\( replaced 8x */',
+            `unexpected first line of patched bundle: ${firstLine}`
+        );
+
+        // Exactly 8 patched call sites.
+        const patchedRe = /\(\(typeof window!=="undefined"&&window\.__pbBridge\)\|\|p\(\)\)\.saveAs\(/g;
+        const patchedMatches = contents.match(patchedRe);
+        assert.ok(patchedMatches, 'expected patched call-site pattern in bundle');
+        assert.strictEqual(
+            patchedMatches.length,
+            8,
+            `expected 8 patched call sites, found ${patchedMatches.length}`
+        );
+
+        // Zero remaining bare `p().saveAs(` (after stripping the header).
+        const header = '/* PAINTBOX-BUNDLE-PATCH v1: p\\(\\)\\.saveAs\\( replaced 8x */\n';
+        const body = contents.startsWith(header) ? contents.slice(header.length) : contents;
+        const bareRe = /(?:^|[^)])p\(\)\.saveAs\(/g;
+        const bareMatches = body.match(bareRe);
+        assert.strictEqual(
+            bareMatches ? bareMatches.length : 0,
+            0,
+            `expected 0 bare p().saveAs( call sites in patched bundle; found ${bareMatches ? bareMatches.length : 0}`
+        );
+
+        // Activation should have run cleanly (the EDH would have failed loud
+        // in beforeAll otherwise). Just sanity-check the extension is active.
+        const ext = vscode.extensions.getExtension(EXTENSION_ID);
+        await ext!.activate();
+        assert.strictEqual(ext!.isActive, true, 'extension should be active');
+    });
 
     test('3c — real round-trip with pixel.png shows ready (slow)', async function () {
         // This test drives the real provider via vscode.openWith. The webview

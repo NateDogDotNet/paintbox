@@ -1,3 +1,14 @@
+// PAINTBOX-PATCH-BEGIN (Phase 4 — see docs/architecture.md §1)
+// The original `filesaver` import is replaced with a paintbox-aware shim that
+// routes saveAs() calls through window.__pbBridge when available (postMessage
+// to the extension host) and falls back to the bundled file-saver lib when
+// the shim is absent (e.g. miniPaint loaded outside the paintbox webview).
+// THIS SOURCE PATCH IS NOT LOAD-BEARING AT RUNTIME — paintbox patches the
+// compiled bundle (dist/bundle.js) directly. This source change exists so a
+// future upstream bump (cp -r v4.x.y) followed by a re-build via `npm run
+// build` produces a bundle that is already paintbox-friendly. See §3 for
+// the bundle-side patch and integrity check.
+// PAINTBOX-PATCH-END
 import app from './../../app.js';
 import config from './../../config.js';
 import Base_layers_class from './../../core/base-layers.js';
@@ -5,7 +16,16 @@ import Helper_class from './../../libs/helpers.js';
 import Dialog_class from './../../libs/popup.js';
 import alertify from './../../../../node_modules/alertifyjs/build/alertify.min.js';
 import canvasToBlob from './../../../../node_modules/blueimp-canvas-to-blob/js/canvas-to-blob.min.js';
-import filesaver from './../../../../node_modules/file-saver/dist/FileSaver.min.js';
+import filesaver_original from './../../../../node_modules/file-saver/dist/FileSaver.min.js';
+const filesaver = {
+    saveAs: function (blob, fname) {
+        const bridge = (typeof window !== 'undefined') ? window.__pbBridge : null;
+        if (bridge && typeof bridge.saveAs === 'function') {
+            return bridge.saveAs(blob, fname);
+        }
+        return filesaver_original.saveAs(blob, fname);
+    }
+};
 import GIF from './../../../../node_modules/gif.js.optimized/';
 import CanvasToTIFF from './../../libs/canvastotiff.js';
 import Tools_settings_class from "../tools/settings";

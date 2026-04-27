@@ -138,4 +138,58 @@ through `acquireVsCodeApi()` (declared via `declare function`) and
 
 ---
 
+**2026-04-27 — Phase 4 SAVE-side: bundle text-replace + shim bridge (build-time-only patch)**
+
+The SAVE side cannot reach miniPaint via a public extension point —
+`File_save_class` calls a bundled `filesaver.saveAs(blob, fname)` whose import
+is webpack-minified into `p().saveAs(...)` inside `dist/bundle.js`. The
+vendored `src/js/modules/file/save.js` is NOT loaded at runtime;
+`vendor/minipaint/index.html` only loads `dist/bundle.js`. Source-only patches
+would be dead text.
+
+Strategy: hybrid (D-prime in `.orchestrator/phase4-design.md` §1).
+1. **Bundle text-replace (load-bearing).** `scripts/patch-bundle.js` (chained
+   from `npm run compile`) reads `vendor/minipaint/dist/bundle.js`, rewrites
+   the 8 `p().saveAs(` call sites to
+   `((typeof window!=="undefined"&&window.__pbBridge)||p()).saveAs(`, and
+   writes `out/webview/minipaint-bundle.patched.js`. Integrity check throws
+   if the call-site count is not exactly 8 — upstream bumps fail loud at
+   build time. `vendor/minipaint/dist/bundle.js` itself stays byte-identical
+   to upstream v4.14.3 (verifiable via sha256sum).
+2. **Source paperwork patch.** `vendor/minipaint/src/js/modules/file/save.js`
+   has its `filesaver` import wrapped with a `__pbBridge`-aware shim,
+   bracketed by `// PAINTBOX-PATCH-BEGIN` / `// PAINTBOX-PATCH-END` markers.
+   NOT load-bearing at runtime, but a future `npm run build` from upstream
+   would produce a paintbox-friendly bundle.
+3. **Shim bridge.** `src/webview/shim.ts` installs
+   `window.__pbBridge.saveAs(blob, fname)` inside its IIFE. The bridge
+   marshals to `Array.from(new Uint8Array(buf))` and posts
+   `{type:'saveResult', bytes, format, filename, mime}` via the
+   closure-captured `vscode` handle from `acquireVsCodeApi()` (single call
+   site preserved per Phase 3 carry-over). The shim `<script>` is injected
+   in the webview HTML immediately BEFORE the patched-bundle `<script>` so
+   `__pbBridge` exists before any keyboard binding fires.
+
+**Override decision (orchestrator-approved): build-time patch only.**
+`activate()` calls `verifyPatchedBundle(extensionPath)` BEFORE registering
+the editor provider; if the artifact is missing/corrupt, activation throws.
+No filesystem writes in the activation hot path. The VSIX ships pre-patched
+because `vsce package` runs through the existing toolchain that depends on
+`npm run compile`.
+
+**Override decision (orchestrator-approved):** `patchMinipaintBundle.ts`
+lives in `src/` (host build, `tsconfig.json`), NOT `src/webview/` (browser
+build with `lib: [ES2020, DOM]`, `types: []`). The helper uses Node
+`fs`/`path`.
+
+Bytes encoding: `number[]` (`Array.from(uint8)`) — JSON-serialization-safe
+across the host boundary. Phase 7 may revisit if 50MB+ saves become routine.
+
+The bundle source-map is copied alongside but offsets shift by the
+PAINTBOX-BUNDLE-PATCH header (~60 bytes) plus per-call-site insertions; this
+makes source-map lookups slightly off past the first call site. Acceptable
+for now; Phase 7 may revisit if stack traces become noisy.
+
+---
+
 *(Add new entries at the bottom, newest last.)*
