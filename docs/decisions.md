@@ -72,4 +72,20 @@ and re-sync the embedded copy if upstream changes.
 
 ---
 
+**2026-04-27 — Test harness: @vscode/test-electron + Mocha (TDD UI)**
+
+Wired up `@vscode/test-electron` (^2.4.0) with `mocha` (^10.4.0) and
+`@types/mocha` (^10.0.6) for the first automated test, alongside the Phase 2
+extension shell. Three files under `src/test/`: `runTest.ts` (driver),
+`suite/index.ts` (Mocha runner), `suite/extension.test.ts` (Phase 2 smoke
+test). The smoke test asserts: extension activates, `vscode.openWith` resolves
+the `paintbox.imageEditor` view type without throwing, and `_getPlaceholderHtml`
+returns the expected marker + file URI. Headless containers need a display —
+run `Xvfb :99 -screen 0 1024x768x24 -nolisten tcp & DISPLAY=:99 npm test` if
+no display is available; `xvfb-run` requires `xauth` which is not installed in
+all environments. `.vscodeignore` excludes `**/*.test.ts` and `out/test/**` so
+tests do not ship in the VSIX.
+
+---
+
 *(Add new entries at the bottom, newest last.)*
