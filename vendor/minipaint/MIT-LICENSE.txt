@@ -1,13 +1,3 @@
-# Third-Party Licenses
-
-## miniPaint
-
-**Project:** miniPaint  
-**Source:** https://github.com/viliusle/miniPaint  
-**Version:** v4.14.3 (as vendored in `vendor/minipaint/`)  
-**License:** MIT
-
-```
 Copyright (c) ViliusL
 https://github.com/viliusle
 
@@ -29,13 +19,3 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
 LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
-
-miniPaint's `MIT-LICENSE.txt` is preserved verbatim in `vendor/minipaint/MIT-LICENSE.txt`.
-
----
-
-*This file satisfies the MIT license condition that "the above copyright notice
-and this permission notice shall be included in all copies or substantial
-portions of the Software" for all third-party code included in this
-distribution.*

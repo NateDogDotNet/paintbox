@@ -60,4 +60,16 @@ the Extensions panel in code-server without manual VSIX sideloading.
 
 ---
 
+**2026-04-27 — miniPaint upstream copyright is `Copyright (c) ViliusL`**
+
+The earlier placeholder in `THIRD_PARTY_LICENSES.md` named `Vilius Sutkus '89`, an
+unrelated developer. miniPaint's actual upstream author is `ViliusL`
+(https://github.com/viliusle). The vendored `MIT-LICENSE.txt` (v4.14.3) was used
+verbatim; the embedded license block in `THIRD_PARTY_LICENSES.md` now matches it
+byte-for-byte (no inserted "The MIT License (MIT)" header — upstream omits it,
+so we omit it). On future upstream bumps, diff `vendor/minipaint/MIT-LICENSE.txt`
+and re-sync the embedded copy if upstream changes.
+
+---
+
 *(Add new entries at the bottom, newest last.)*
