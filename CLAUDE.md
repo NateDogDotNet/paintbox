@@ -30,7 +30,7 @@ Server FS  ←→  Extension Host (Node, src/)  ←→  Webview (miniPaint, vend
 
 - **`src/extension.ts`** — `activate()` registers the provider. That's it.
 - **`src/editorProvider.ts`** — `PaintboxEditorProvider` implements `CustomEditorProvider<ImageDocument>`. The four lifecycle methods (`openCustomDocument`, `resolveCustomEditor`, `saveCustomDocument`, `saveCustomDocumentAs`) are the only places that touch disk; everything else is the webview's problem.
-- **`vendor/minipaint/`** — upstream miniPaint, committed copy at v4.14.3 (not a submodule). Currently empty (`.gitkeep`); Phase 1 populates it. The save hook (`File_save` in `src/actions/file/`) gets patched to `postMessage` instead of triggering a browser download.
+- **`vendor/minipaint/`** — upstream miniPaint, committed copy at v4.14.3 (not a submodule). Populated in Phase 1. The save hook (`File_save_class` in `vendor/minipaint/src/js/modules/file/save.js`) gets patched to `postMessage` instead of triggering a browser download.
 
 The full sequence diagram and rationale for `postMessage` as the only bridge is in `docs/architecture.md`. Read that before touching the host↔webview boundary.
 
