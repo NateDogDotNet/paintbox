@@ -101,8 +101,8 @@ works but adds complexity.
 
 ### miniPaint save hook surface
 
-The `File_save` module in miniPaint is the interception point. The webview wrapper
-needs to intercept the save action before miniPaint writes to the browser's download
-stream and redirect the output bytes to `postMessage`. Specific approach depends on
-which miniPaint API surface is stable across versions — audit `src/actions/file/` in
-the miniPaint source before implementing.
+`File_save_class` in `vendor/minipaint/src/js/modules/file/save.js` is the
+interception point. The webview wrapper needs to intercept the save action before
+miniPaint writes to the browser's download stream and redirect the output bytes to
+`postMessage`. The class is a singleton with a `set_events()` initializer and a
+`SAVE_TYPES` map (PNG/JPG/etc.) — confirmed against v4.14.3.
