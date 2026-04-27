@@ -1,0 +1,61 @@
+{
+  "name": "paintbox",
+  "displayName": "Paintbox — Image Editor",
+  "description": "Full-featured layered image editor (powered by miniPaint) with proper save-to-disk for code-server and VS Code.",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "wegener",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.87.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "image editor",
+    "paint",
+    "photo editor",
+    "minipaint",
+    "code-server"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NateDogDotNet/paintbox"
+  },
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "paintbox.imageEditor",
+        "displayName": "Paintbox Image Editor",
+        "selector": [
+          { "filenamePattern": "*.png" },
+          { "filenamePattern": "*.jpg" },
+          { "filenamePattern": "*.jpeg" },
+          { "filenamePattern": "*.webp" },
+          { "filenamePattern": "*.gif" },
+          { "filenamePattern": "*.bmp" }
+        ],
+        "priority": "option"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src",
+    "pretest": "npm run compile",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package --no-yarn",
+    "publish:ovsx": "ovsx publish paintbox-*.vsix --pat $OVSX_PAT"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.87.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "@vscode/vsce": "^2.26.0",
+    "ovsx": "^0.9.0"
+  }
+}
