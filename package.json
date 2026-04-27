@@ -43,7 +43,7 @@
     ]
   },
   "scripts": {
-    "compile": "tsc -p ./",
+    "compile": "tsc -p ./ && tsc -p tsconfig.webview.json",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src",
     "pretest": "npm run compile",

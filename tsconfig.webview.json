@@ -1,0 +1,28 @@
+{
+  // Webview shim build: emits a browser-loadable IIFE/script that runs inside
+  // the miniPaint webview. Targets ES2020 with module:none so tsc does NOT add
+  // a CommonJS preamble (`"use strict"; Object.defineProperty(exports,…)`),
+  // which would crash in a browser context where `exports` is undefined.
+  //
+  // Single-step compile is preserved by chaining this in `npm run compile`:
+  //   tsc -p ./ && tsc -p tsconfig.webview.json
+  //
+  // The host build (tsconfig.json) excludes `src/webview/**` so the shim is
+  // never accidentally CommonJS-emitted into out/webview/ by the Node build.
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "none",
+    "lib": ["ES2020", "DOM"],
+    "outDir": "./out",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": false,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "sourceMap": true,
+    "declaration": false,
+    "types": []
+  },
+  "include": ["src/webview/**/*"],
+  "exclude": ["node_modules", "out", "vendor"]
+}

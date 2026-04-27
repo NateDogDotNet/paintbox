@@ -1,4 +1,9 @@
 {
+  // Host (Node) build. CommonJS targeting Node — produces `out/extension.js`,
+  // `out/editorProvider.js`, etc. The webview shim has its own tsconfig
+  // (`tsconfig.webview.json`) because it must compile to a browser-loadable
+  // script, not a Node module. `src/webview/**` is excluded here so the host
+  // build never accidentally re-emits the shim under CommonJS.
   "compilerOptions": {
     "target": "ES2020",
     "module": "commonjs",
@@ -13,5 +18,5 @@
     "declaration": false
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "out", "vendor"]
+  "exclude": ["node_modules", "out", "vendor", "src/webview/**"]
 }

@@ -1,6 +1,7 @@
 src/**
 .gitignore
 tsconfig.json
+tsconfig.webview.json
 .vscode-test/
 node_modules/**
 !node_modules/@vscode/

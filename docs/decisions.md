@@ -88,4 +88,54 @@ tests do not ship in the VSIX.
 
 ---
 
+**2026-04-27 — Phase 3 OPEN-side: read upstream `index.html`, inject via host transforms (no upstream patch)**
+
+The OPEN side of the round-trip does NOT patch `vendor/minipaint/`. miniPaint's
+`File_open_class.file_open_data_url_handler(dataUrl)` is a public method (line
+213 of `vendor/minipaint/src/js/modules/file/open.js`), so the shim can call
+it directly via `window.app.File_open` after detecting initialization. The
+host's `buildWebviewHtml` reads upstream `index.html` synchronously via
+`fs.readFileSync`, applies three transforms (inject `<base href>` + CSP
+`<meta>` after `<head>`; set `data-state="loading"` on `<body>`; inject chrome
+`<style>`/markup + shim `<script>` before `</body>`), and returns the string.
+This contrasts with the SAVE side (Phase 4), which has no public extension
+point and DOES require patching `vendor/minipaint/src/js/modules/file/save.js`.
+
+Asset URI rewriting uses a single `<base href="<asWebviewUri-of-vendor/minipaint/>/">`
+because miniPaint's bundled `style-loader` injects `<style>` tags at runtime
+with relative `url('images/icons/*.svg')` — invisible to per-attribute
+rewriting at host build time. CSP is pragmatic v1: `default-src 'none'`,
+`style-src 'unsafe-inline'` (required by style-loader), `script-src
+${webview.cspSource}` only (no `unsafe-eval` per bundle audit). Tighten in
+Phase 7 if upstream adds inline scripts.
+
+Wire protocol for the Phase 3 host↔webview round-trip:
+host→webview `{type:'load', dataUrl, filename, mime}`; webview→host
+`{type:'webviewReady'}`, `{type:'ready'}`, `{type:'loadError', error}`,
+`{type:'retry'}`. Data-URL chosen over byte-array because miniPaint's
+`file_open_data_url_handler` consumes it natively (single conversion) and
+serializes ~6× smaller than a JSON-encoded number array.
+
+Full design rationale and the chrome HTML/CSS/JS spec live at
+`.orchestrator/phase3-design.md` (orchestrator artifact, gitignored).
+
+---
+
+**2026-04-27 — Phase 3 webview shim is TypeScript with a second tsconfig**
+
+`src/webview/shim.ts` compiles via a separate `tsconfig.webview.json`
+(`module: "none"`, `target: "ES2020"`, `lib: ["ES2020","DOM"]`, `types: []`).
+The host build (`tsconfig.json`) excludes `src/webview/**` so it never
+accidentally re-emits the shim under CommonJS — a CommonJS preamble
+(`Object.defineProperty(exports, "__esModule", …)`) crashes in a browser
+context where `exports` is undefined. Single `npm run compile` step is
+preserved by chaining: `tsc -p ./ && tsc -p tsconfig.webview.json`.
+`tsconfig.webview.json` is added to `.vscodeignore` so it does not ship in
+the VSIX. The shim is wrapped in an IIFE and uses no `import`/`export`
+statements — interaction with the VS Code webview API and miniPaint goes
+through `acquireVsCodeApi()` (declared via `declare function`) and
+`(window as unknown as {…}).app` access.
+
+---
+
 *(Add new entries at the bottom, newest last.)*

@@ -5,42 +5,45 @@ import * as fs from 'fs';
 import * as vscode from 'vscode';
 
 /**
- * Phase 2 smoke test (see docs/integration-plan.md):
- *   - Extension activates without throwing.
- *   - The custom editor `paintbox.imageEditor` is wired up such that
- *     `vscode.openWith` resolves a webview without throwing.
- *   - The placeholder HTML contains the expected marker text and the file URI.
+ * Phase 3 tests (see docs/integration-plan.md and .orchestrator/phase3-design.md):
  *
- * The third assertion reaches into the compiled provider directly via require()
- * to call `_getPlaceholderHtml`. That is intentional for Phase 2: the placeholder
- * is the contract being tested, and reading it back from a webview after open
- * is racy in the test harness. When Phase 3 replaces the placeholder with the
- * miniPaint HTML, this direct call should be removed and replaced with a check
- * for the loaded miniPaint markup.
+ *   1. Extension activates without throwing.
+ *   2. paintbox.imageEditor opens a .png via vscode.openWith without throwing
+ *      (Phase 2 carry-over; subsumes the old smoke test).
+ *   3a. (UNIT) buildWebviewHtml emits the required markers (base href, CSP,
+ *       miniPaint bundle script tag, shim script tag, pb_chrome overlay,
+ *       data-state attribute set up).
+ *   3b. (INTEGRATION) host responds to a `webviewReady` message with a `load`
+ *       message carrying a data-URL and basename filename.
+ *   3c. (INTEGRATION, demotable per Q5) opening the pixel.png fixture results
+ *       in the webview posting `ready`.
+ *
+ * Phase 2's third test (`_getPlaceholderHtml` direct call) is replaced — the
+ * placeholder helper has been deleted.
  */
 
 const EXTENSION_ID = 'NateDogDotNet.paintbox';
+// __dirname is out/test/suite at runtime; fixtures live in src/test/suite/fixtures.
+// Compute the repo root and reach into src/. tsc doesn't copy .png assets, and a
+// pretest hook is overkill for a single 67-byte file.
+const FIXTURE_PNG = path.resolve(__dirname, '../../../src/test/suite/fixtures/pixel.png');
 
-suite('Paintbox Phase 2 — Extension Shell', () => {
+suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'paintbox-test-'));
-    const fixturePng = path.join(tmpDir, 'fixture.png');
-    let fixtureUri: vscode.Uri;
+    const tmpFixturePng = path.join(tmpDir, 'fixture.png');
+    let tmpFixtureUri: vscode.Uri;
+    let realFixtureUri: vscode.Uri;
 
     suiteSetup(() => {
-        // 1x1 transparent PNG (smallest valid PNG, 67 bytes).
-        const pngBytes = Buffer.from([
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
-            0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41,
-            0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
-            0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00,
-            0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
-            0x42, 0x60, 0x82,
-        ]);
-        fs.writeFileSync(fixturePng, pngBytes);
-        fixtureUri = vscode.Uri.file(fixturePng);
+        // Copy the checked-in 1x1 PNG (src/test/suite/fixtures/pixel.png, 67
+        // bytes) to a tmp file so tests don't pollute the source tree. Source
+        // bytes auditable from the fixture file itself; matches the byte
+        // sequence used in Phase 2's smoke test.
+        const fixtureBytes = fs.readFileSync(FIXTURE_PNG);
+        assert.strictEqual(fixtureBytes.length, 67, 'fixtures/pixel.png unexpected size');
+        fs.writeFileSync(tmpFixturePng, fixtureBytes);
+        tmpFixtureUri = vscode.Uri.file(tmpFixturePng);
+        realFixtureUri = vscode.Uri.file(FIXTURE_PNG);
     });
 
     suiteTeardown(() => {
@@ -65,7 +68,7 @@ suite('Paintbox Phase 2 — Extension Shell', () => {
         // If the view type is not registered, this command rejects.
         await vscode.commands.executeCommand(
             'vscode.openWith',
-            fixtureUri,
+            tmpFixtureUri,
             'paintbox.imageEditor'
         );
 
@@ -73,27 +76,213 @@ suite('Paintbox Phase 2 — Extension Shell', () => {
         await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
     });
 
-    test('placeholder HTML contains the marker text and the file URI', async () => {
-        // Import the compiled provider and call the placeholder method directly.
-        // The method is private at the TS level, so reach in via bracket access on
-        // an instance. We build a minimal fake ExtensionContext — the placeholder
-        // method does not consult it.
+    // ---------- Test 3a: HTML builder unit test ---------------------------
+
+    test('3a — buildWebviewHtml emits required markers', () => {
+        // Pure-function unit test: stub a Webview and call buildWebviewHtml directly.
+        // No real webview needed — the HTML string is the contract under test.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { buildWebviewHtml } = require('../../webviewHtml');
+        assert.ok(typeof buildWebviewHtml === 'function', 'buildWebviewHtml not exported');
+
+        // Determine the extensionUri the same way the test harness's extension does:
+        // two dirs up from out/test/suite (i.e. the repo root).
+        const extensionPath = path.resolve(__dirname, '../../..');
+        const extensionUri = vscode.Uri.file(extensionPath);
+
+        const fakeCspSource = 'vscode-webview://fake-cspsource';
+        const fakeWebview: Pick<vscode.Webview, 'cspSource' | 'asWebviewUri'> = {
+            cspSource: fakeCspSource,
+            asWebviewUri: (uri: vscode.Uri) =>
+                vscode.Uri.parse(`https://fake-webview.test${uri.path}`),
+        };
+
+        const html: string = buildWebviewHtml(
+            fakeWebview,
+            extensionUri,
+            { filename: 'test.png' }
+        );
+
+        // <base href="..."> injected, points at vendor/minipaint/ (with trailing slash).
+        assert.match(
+            html,
+            /<base href="https:\/\/fake-webview\.test[^"]*\/vendor\/minipaint\/"/,
+            'expected <base href> pointing at vendor/minipaint/'
+        );
+
+        // CSP meta with the webview cspSource somewhere in script-src.
+        assert.match(
+            html,
+            /<meta http-equiv="Content-Security-Policy"[^>]*content="[^"]*script-src[^"]*vscode-webview:\/\/fake-cspsource/,
+            'expected CSP meta with cspSource in script-src'
+        );
+
+        // Bundle script tag (relative to base href, so `dist/bundle.js`).
+        assert.match(
+            html,
+            /<script src="dist\/bundle\.js"/,
+            'expected miniPaint bundle <script src="dist/bundle.js">'
+        );
+
+        // Shim script tag (rewritten via asWebviewUri to a fake-webview URL).
+        assert.match(
+            html,
+            /<script src="https:\/\/fake-webview\.test[^"]*\/out\/webview\/shim\.js"/,
+            'expected shim <script src> pointing at out/webview/shim.js via asWebviewUri'
+        );
+
+        // pb_chrome overlay div present.
+        assert.match(html, /id="pb_chrome"/, 'expected #pb_chrome overlay container');
+
+        // pb_caption element present so shim can write the basename into it.
+        assert.match(html, /id="pb_caption"/, 'expected #pb_caption element');
+
+        // Initial data-state="loading" set on body.
+        assert.match(
+            html,
+            /<body[^>]*data-state="loading"/,
+            'expected <body data-state="loading"> initial state'
+        );
+    });
+
+    // ---------- Test 3b: host posts load after webviewReady ----------------
+
+    test('3b — host posts load message after webviewReady', async () => {
+        // Build a fake WebviewPanel-shaped object that exposes the bits
+        // resolveCustomEditor uses. We invoke resolveCustomEditor directly
+        // with the fake panel and drive the webviewReady → load round-trip
+        // without spinning up a real webview.
+
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const providerModule = require('../../editorProvider');
         const Provider = providerModule.PaintboxEditorProvider;
         assert.ok(Provider, 'PaintboxEditorProvider not exported');
 
-        const fakeContext = {} as vscode.ExtensionContext;
-        const instance = new Provider(fakeContext);
-        const html: string = instance['_getPlaceholderHtml'](fixtureUri);
+        const ext = vscode.extensions.getExtension(EXTENSION_ID);
+        await ext!.activate();
 
-        assert.ok(
-            html.includes('Paintbox — Image Editor'),
-            'placeholder HTML missing "Paintbox — Image Editor" marker'
+        const extensionPath = path.resolve(__dirname, '../../..');
+        const extensionUri = vscode.Uri.file(extensionPath);
+        const fakeContext = {
+            extensionUri,
+            subscriptions: [] as vscode.Disposable[],
+        } as unknown as vscode.ExtensionContext;
+
+        const provider = new Provider(fakeContext);
+
+        const document = await provider.openCustomDocument(
+            tmpFixtureUri,
+            { backupId: undefined } as unknown as vscode.CustomDocumentOpenContext,
+            new vscode.CancellationTokenSource().token
         );
+        assert.ok(document, 'openCustomDocument returned undefined');
+
+        type PostedMessage = { type: string; [k: string]: unknown };
+        const posted: PostedMessage[] = [];
+        let messageHandler: ((msg: PostedMessage) => void) | undefined;
+
+        const fakeWebview = {
+            cspSource: 'vscode-webview://fake',
+            options: {} as vscode.WebviewOptions,
+            html: '',
+            asWebviewUri: (uri: vscode.Uri) =>
+                vscode.Uri.parse(`https://fake-webview.test${uri.path}`),
+            onDidReceiveMessage: (cb: (msg: PostedMessage) => void) => {
+                messageHandler = cb;
+                return new vscode.Disposable(() => { messageHandler = undefined; });
+            },
+            postMessage: async (msg: PostedMessage) => {
+                posted.push(msg);
+                return true;
+            },
+        };
+
+        const onDisposeListeners: Array<() => void> = [];
+        const fakePanel = {
+            webview: fakeWebview,
+            onDidDispose: (cb: () => void) => {
+                onDisposeListeners.push(cb);
+                return new vscode.Disposable(() => {
+                    const i = onDisposeListeners.indexOf(cb);
+                    if (i >= 0) onDisposeListeners.splice(i, 1);
+                });
+            },
+        } as unknown as vscode.WebviewPanel;
+
+        await provider.resolveCustomEditor(
+            document,
+            fakePanel,
+            new vscode.CancellationTokenSource().token
+        );
+
+        // After resolveCustomEditor, the webview HTML must be set, and
+        // onDidReceiveMessage must have registered a handler.
+        assert.ok(fakeWebview.html.length > 0, 'webview.html was not set');
+        assert.ok(messageHandler, 'host did not register an onDidReceiveMessage handler');
+
+        // Simulate the shim signalling readiness.
+        await Promise.resolve(messageHandler!({ type: 'webviewReady' }));
+
+        // Allow microtasks to drain (postLoad is async — readFile + base64).
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+        const loadMsg = posted.find((m) => m.type === 'load');
+        assert.ok(loadMsg, `expected a 'load' postMessage; saw: ${JSON.stringify(posted)}`);
+        assert.strictEqual(loadMsg!.filename, 'fixture.png', 'filename should be basename');
+        assert.strictEqual(loadMsg!.mime, 'image/png', 'mime should be image/png');
+        const dataUrl = String(loadMsg!.dataUrl);
         assert.ok(
-            html.includes(fixtureUri.fsPath),
-            `placeholder HTML missing file URI ${fixtureUri.fsPath}`
+            dataUrl.startsWith('data:image/png;base64,'),
+            `dataUrl should be a base64 PNG data-URL; got: ${dataUrl.slice(0, 40)}…`
+        );
+
+        // Cleanup: invoke any onDispose listeners.
+        for (const cb of onDisposeListeners) cb();
+    });
+
+    // ---------- Test 3c: real round-trip (demotable per Q5) ---------------
+
+    test('3c — real round-trip with pixel.png shows ready (slow)', async function () {
+        // This test drives the real provider via vscode.openWith. The webview
+        // boots miniPaint for real, runs the shim, posts webviewReady, the
+        // host posts load, the shim hands the data-URL to miniPaint, and the
+        // shim eventually posts ready. We can't directly observe the webview's
+        // outbound messages because vscode.openWith returns no panel handle,
+        // so we just assert that the open call resolves cleanly and that no
+        // error notification was raised. Per Q5 this is the "automatable
+        // smoke" tier — demotion to manual is acceptable if it flakes.
+        this.timeout(15000);
+
+        const ext = vscode.extensions.getExtension(EXTENSION_ID);
+        await ext!.activate();
+
+        let errorShown: string | undefined;
+        const origShowError = vscode.window.showErrorMessage;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (vscode.window as any).showErrorMessage = async (msg: string, ..._items: unknown[]) => {
+            errorShown = msg;
+            return undefined;
+        };
+
+        try {
+            await vscode.commands.executeCommand(
+                'vscode.openWith',
+                realFixtureUri,
+                'paintbox.imageEditor'
+            );
+            // Give miniPaint time to boot inside the webview and the shim's
+            // double-rAF heuristic time to fire ready.
+            await new Promise<void>((resolve) => setTimeout(resolve, 4000));
+        } finally {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (vscode.window as any).showErrorMessage = origShowError;
+            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        }
+
+        assert.strictEqual(
+            errorShown,
+            undefined,
+            `unexpected error shown by extension: ${errorShown}`
         );
     });
 });

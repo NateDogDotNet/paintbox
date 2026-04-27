@@ -1,21 +1,47 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import { buildWebviewHtml } from './webviewHtml';
 
 /**
  * ImageDocument — the in-memory model for an open image file.
  *
- * TODO (Phase 3): Hold the raw file bytes so they can be posted into the
- * webview on open, and track dirty state so VS Code knows when to offer Save.
+ * Phase 3 stores no bytes here: the host re-reads from disk on every load
+ * (initial open AND retry) so the document remains a thin URI wrapper. Phase 5
+ * will introduce dirty tracking and pending save state.
  */
 class ImageDocument implements vscode.CustomDocument {
     readonly uri: vscode.Uri;
+    /** Derived from extension on open; informational for the load message. */
+    readonly mime: string;
 
-    constructor(uri: vscode.Uri) {
+    constructor(uri: vscode.Uri, mime: string) {
         this.uri = uri;
+        this.mime = mime;
     }
 
     dispose(): void {
-        // TODO (Phase 5): If we buffer a modified copy in memory, free it here.
+        // No buffered state in Phase 3.
     }
+}
+
+/**
+ * Phase 3 file extension → MIME map. Covers exactly the six extensions
+ * declared in `package.json` `contributes.customEditors[].selector`. Anything
+ * else (e.g. `.tiff`) gets a synthesized `image/octet-stream` and the shim
+ * surfaces a defensive error overlay (see Phase 3 design §9 Q1).
+ */
+const MIME_BY_EXT: Record<string, string> = {
+    '.png':  'image/png',
+    '.jpg':  'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif':  'image/gif',
+    '.webp': 'image/webp',
+    '.bmp':  'image/bmp',
+};
+
+function deriveMime(uri: vscode.Uri): string {
+    const ext = path.extname(uri.fsPath).toLowerCase();
+    return MIME_BY_EXT[ext] || 'application/octet-stream';
 }
 
 /**
@@ -23,18 +49,19 @@ class ImageDocument implements vscode.CustomDocument {
  * webview and bridges the open/edit/save round-trip to the server filesystem.
  *
  * Architecture (see docs/architecture.md for Mermaid sequence diagram):
- *   1. openCustomDocument   — read raw bytes from disk into ImageDocument
- *   2. resolveCustomEditor  — create webview, load miniPaint HTML, post bytes
+ *   1. openCustomDocument   — derive MIME, return ImageDocument (bytes are
+ *                             read on demand by the load round-trip)
+ *   2. resolveCustomEditor  — set localResourceRoots, set webview.html via
+ *                             buildWebviewHtml, wire postMessage handler
  *   3. (user edits in miniPaint)
- *   4. saveCustomDocument   — receive postMessage from webview, writeFile to disk
+ *   4. saveCustomDocument   — Phase 5
  *
  * Phase map:
- *   Phase 2 — stub registration (current)
- *   Phase 3 — openCustomDocument: vscode.workspace.fs.readFile
- *           — resolveCustomEditor: webview HTML, postMessage with bytes
+ *   Phase 2 — stub registration (done)
+ *   Phase 3 — open file: read bytes → webview (this commit)
  *   Phase 4 — patch miniPaint File_save to postMessage result back to host
- *   Phase 5 — saveCustomDocument / saveCustomDocumentAs: vscode.workspace.fs.writeFile
- *   Phase 6 — format conversion (export PNG/JPG/WebP from miniPaint native .json)
+ *   Phase 5 — saveCustomDocument / saveCustomDocumentAs writeFile
+ *   Phase 6 — format conversion (Save As)
  */
 export class PaintboxEditorProvider
     implements vscode.CustomEditorProvider<ImageDocument>
@@ -70,10 +97,11 @@ export class PaintboxEditorProvider
         _openContext: vscode.CustomDocumentOpenContext,
         _token: vscode.CancellationToken
     ): Promise<ImageDocument> {
-        // TODO (Phase 3): Read file bytes here:
-        //   const bytes = await vscode.workspace.fs.readFile(uri);
-        //   Return an ImageDocument that holds those bytes.
-        return new ImageDocument(uri);
+        // Phase 3: bytes are NOT cached on the document. Each load posts a
+        // fresh read, so retry is consistent with disk state and we don't
+        // burn memory on every open. Phase 5 will revisit if the round-trip
+        // demands a buffer.
+        return new ImageDocument(uri, deriveMime(uri));
     }
 
     async resolveCustomEditor(
@@ -81,32 +109,76 @@ export class PaintboxEditorProvider
         webviewPanel: vscode.WebviewPanel,
         _token: vscode.CancellationToken
     ): Promise<void> {
+        const extensionUri = this._context.extensionUri;
+
         webviewPanel.webview.options = {
             enableScripts: true,
+            localResourceRoots: [
+                vscode.Uri.joinPath(extensionUri, 'vendor', 'minipaint'),
+                vscode.Uri.joinPath(extensionUri, 'out', 'webview'),
+            ],
         };
 
-        // TODO (Phase 2–3): Set webviewPanel.webview.html to the miniPaint
-        // HTML loaded from vendor/minipaint/. Use webview.asWebviewUri() to
-        // convert local paths to webview-safe URIs.
-        //
-        // TODO (Phase 3): After HTML is loaded, post the file bytes:
-        //   webviewPanel.webview.postMessage({ type: 'load', bytes: [...document.bytes] });
-        //
-        // TODO (Phase 4–5): Listen for save messages from the webview:
-        //   webviewPanel.webview.onDidReceiveMessage(msg => {
-        //     if (msg.type === 'save') { ... writeFile ... }
-        //   });
+        const filename = path.basename(document.uri.fsPath);
 
-        webviewPanel.webview.html = this._getPlaceholderHtml(document.uri);
+        webviewPanel.webview.html = buildWebviewHtml(
+            webviewPanel.webview,
+            extensionUri,
+            { filename }
+        );
+
+        const postLoad = async (): Promise<void> => {
+            try {
+                const bytes = await vscode.workspace.fs.readFile(document.uri);
+                const dataUrl =
+                    `data:${document.mime};base64,` +
+                    Buffer.from(bytes).toString('base64');
+                await webviewPanel.webview.postMessage({
+                    type: 'load',
+                    dataUrl,
+                    filename,
+                    mime: document.mime,
+                });
+            } catch (err: unknown) {
+                const message = err instanceof Error ? err.message : String(err);
+                // Surface the full URI in the error path per Phase 3 design §9 Q2.
+                vscode.window.showErrorMessage(
+                    `Paintbox: failed to read ${document.uri.toString()}: ${message}`
+                );
+            }
+        };
+
+        const messageSub = webviewPanel.webview.onDidReceiveMessage(async (msg) => {
+            if (!msg || typeof msg !== 'object') return;
+            switch (msg.type) {
+                case 'webviewReady':
+                    await postLoad();
+                    return;
+                case 'retry':
+                    await postLoad();
+                    return;
+                case 'ready':
+                    // Phase 3: nothing to do; Phase 5 may resolve a pending Promise.
+                    return;
+                case 'loadError':
+                    vscode.window.showErrorMessage(
+                        `Paintbox: ${String(msg.error || 'unknown error')} (${document.uri.toString()})`
+                    );
+                    return;
+            }
+        });
+
+        webviewPanel.onDidDispose(() => {
+            messageSub.dispose();
+        });
     }
 
     async saveCustomDocument(
         _document: ImageDocument,
         _cancellation: vscode.CancellationToken
     ): Promise<void> {
-        // TODO (Phase 5): Receive the latest bytes from the webview (via a
-        // pending Promise set up in resolveCustomEditor) and write them:
-        //   await vscode.workspace.fs.writeFile(document.uri, bytes);
+        // Phase 5: receive the latest bytes from the webview (via a pending
+        // promise set up in resolveCustomEditor) and write them to disk.
         throw new Error('Save not yet implemented — see docs/integration-plan.md Phase 5');
     }
 
@@ -115,7 +187,7 @@ export class PaintboxEditorProvider
         _destination: vscode.Uri,
         _cancellation: vscode.CancellationToken
     ): Promise<void> {
-        // TODO (Phase 6): Same as saveCustomDocument but write to _destination.
+        // Phase 6: same as saveCustomDocument but writes to _destination.
         throw new Error('Save As not yet implemented — see docs/integration-plan.md Phase 6');
     }
 
@@ -123,7 +195,7 @@ export class PaintboxEditorProvider
         _document: ImageDocument,
         _cancellation: vscode.CancellationToken
     ): Promise<void> {
-        // TODO (Phase 5): Re-read the file from disk and re-post into the webview.
+        // Phase 5: re-read the file from disk and re-post into the webview.
     }
 
     async backupCustomDocument(
@@ -131,34 +203,10 @@ export class PaintboxEditorProvider
         _context: vscode.CustomDocumentBackupContext,
         _cancellation: vscode.CancellationToken
     ): Promise<vscode.CustomDocumentBackup> {
-        // TODO (Phase 5): Write a backup copy to context.destination.
+        // Phase 5: write a backup copy to context.destination.
         return {
             id: _context.destination.toString(),
             delete: () => { /* no-op for now */ },
         };
-    }
-
-    // -------------------------------------------------------------------------
-    // Helpers
-    // -------------------------------------------------------------------------
-
-    private _getPlaceholderHtml(uri: vscode.Uri): string {
-        return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Paintbox</title>
-  <style>
-    body { font-family: sans-serif; padding: 2rem; color: #ccc; background: #1e1e1e; }
-    code { background: #333; padding: 2px 6px; border-radius: 3px; }
-  </style>
-</head>
-<body>
-  <h2>Paintbox — Image Editor</h2>
-  <p>Editing: <code>${uri.fsPath}</code></p>
-  <p>miniPaint not yet vendored. See <code>docs/integration-plan.md</code> Phase 1.</p>
-</body>
-</html>`;
     }
 }

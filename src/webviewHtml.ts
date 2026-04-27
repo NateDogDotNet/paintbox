@@ -1,0 +1,254 @@
+import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
+
+/**
+ * buildWebviewHtml — pure function that produces the webview's HTML string.
+ *
+ * Reads upstream `vendor/minipaint/index.html` from disk, applies three
+ * transforms, and returns the modified HTML:
+ *
+ *   1. Inject `<base href="<webviewUri-of-vendor/minipaint/>">` immediately
+ *      after `<head>`. This rewrites every relative URL miniPaint emits at
+ *      runtime (style-loader injects `<style>` tags with relative
+ *      url('images/icons/*.svg') references — only `<base href>` covers them).
+ *   2. Inject CSP `<meta>`. See Phase 3 design §4.
+ *   3. Inject the chrome `<style>` block + the `pb_chrome` overlay markup +
+ *      the shim `<script>` immediately before `</body>`.
+ *
+ * The function is pure (no side effects beyond `fs.readFileSync`) so test 3a
+ * can call it directly with a stub Webview.
+ *
+ * Architectural rationale: see `.orchestrator/phase3-design.md` §2 (option a:
+ * "read upstream, rewrite via injection, do not patch upstream HTML").
+ */
+
+export interface BuildWebviewHtmlOptions {
+    /**
+     * Initial filename caption for the loading overlay. Phase 3 design §9 Q2:
+     * basename in the loading overlay; full URI surfaces only in error
+     * overlays via host postMessage.
+     */
+    filename: string;
+}
+
+interface WebviewLike {
+    cspSource: string;
+    asWebviewUri: (uri: vscode.Uri) => vscode.Uri;
+}
+
+export function buildWebviewHtml(
+    webview: WebviewLike,
+    extensionUri: vscode.Uri,
+    opts: BuildWebviewHtmlOptions
+): string {
+    const minipaintRoot = vscode.Uri.joinPath(extensionUri, 'vendor', 'minipaint');
+    const indexHtmlPath = path.join(minipaintRoot.fsPath, 'index.html');
+    const upstream = fs.readFileSync(indexHtmlPath, 'utf8');
+
+    // base href must end with a trailing slash so relative resolution lands
+    // inside the miniPaint root (otherwise "dist/bundle.js" would resolve as
+    // a sibling of the directory, not a child).
+    const baseHrefUri = webview.asWebviewUri(minipaintRoot).toString();
+    const baseHref = baseHrefUri.endsWith('/') ? baseHrefUri : baseHrefUri + '/';
+
+    const shimUri = webview.asWebviewUri(
+        vscode.Uri.joinPath(extensionUri, 'out', 'webview', 'shim.js')
+    ).toString();
+
+    const csp =
+        `default-src 'none'; ` +
+        `img-src ${webview.cspSource} data: blob:; ` +
+        `style-src ${webview.cspSource} 'unsafe-inline'; ` +
+        `font-src ${webview.cspSource}; ` +
+        `script-src ${webview.cspSource}; ` +
+        `connect-src ${webview.cspSource};`;
+
+    const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
+    const baseTag = `<base href="${baseHref}">`;
+
+    const headInjection = `\n\t${baseTag}\n\t${cspMeta}\n`;
+
+    // Inject base + CSP immediately after the opening <head> tag. The upstream
+    // `<head>` may have attributes in future bumps; match the tag flexibly.
+    let html = upstream.replace(
+        /<head(\s[^>]*)?>/i,
+        (match) => match + headInjection
+    );
+
+    const escapedFilename = htmlEscape(opts.filename);
+
+    const chrome = `
+<style>
+:root {
+    --pb-bg:        var(--vscode-editor-background, #1e1e1e);
+    --pb-fg:        var(--vscode-foreground, #cccccc);
+    --pb-fg-muted:  var(--vscode-descriptionForeground, #9d9d9d);
+    --pb-error:     var(--vscode-errorForeground, #f48771);
+    --pb-btn-bg:    var(--vscode-button-background, #0e639c);
+    --pb-btn-fg:    var(--vscode-button-foreground, #ffffff);
+    --pb-btn-hov:   var(--vscode-button-hoverBackground, #1177bb);
+    --pb-progress:  var(--vscode-progressBar-background, #0e70c0);
+    --pb-radius:    2px;
+}
+#pb_chrome {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    pointer-events: none;
+}
+.pb-overlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    background: var(--pb-bg);
+    color: var(--pb-fg);
+    font-family: var(--vscode-font-family, "Segoe UI", system-ui, sans-serif);
+    font-size: var(--vscode-font-size, 13px);
+    pointer-events: auto;
+}
+body[data-state="loading"] .pb-overlay--loading { display: flex; }
+body[data-state="error"]   .pb-overlay--error   { display: flex; }
+body[data-state="ready"]   #pb_chrome           { display: none; }
+.pb-spinner {
+    position: relative;
+    width: 36px;
+    height: 36px;
+}
+.pb-spinner__arc {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 1.5px solid transparent;
+    border-top-color: var(--pb-progress);
+    animation: pb-spin 1.2s linear infinite;
+}
+.pb-spinner__arc--inner {
+    inset: 6px;
+    border-top-color: var(--pb-fg-muted);
+    animation-duration: 0.9s;
+    animation-direction: reverse;
+}
+.pb-spinner__dot {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 4px; height: 4px;
+    background: var(--pb-fg-muted);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    display: none;
+}
+@keyframes pb-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .pb-spinner__arc { animation: none; border-top-color: transparent; }
+    .pb-spinner__dot { display: block; background: var(--pb-progress); width: 8px; height: 8px; }
+}
+.pb-status {
+    margin: 0;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+}
+.pb-caption {
+    margin: 0;
+    color: var(--pb-fg-muted);
+    font-size: 0.9em;
+    font-family: var(--vscode-editor-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+    max-width: 60ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.pb-error-card {
+    max-width: 420px;
+    padding: 20px 24px;
+    border-top: 2px solid var(--pb-error);
+    background: var(--pb-bg);
+    box-sizing: border-box;
+}
+.pb-error-title {
+    margin: 0 0 8px 0;
+    font-weight: 600;
+    color: var(--pb-error);
+}
+.pb-error-message {
+    margin: 0 0 16px 0;
+    color: var(--pb-fg-muted);
+    font-family: var(--vscode-editor-font-family, ui-monospace, "SF Mono", Menlo, monospace);
+    font-size: 0.9em;
+    word-break: break-word;
+}
+.pb-error-actions {
+    display: flex;
+    gap: 8px;
+}
+.pb-btn {
+    appearance: none;
+    border: 1px solid transparent;
+    border-radius: var(--pb-radius);
+    padding: 4px 14px;
+    font: inherit;
+    cursor: pointer;
+    background: transparent;
+    color: var(--pb-fg);
+}
+.pb-btn--primary {
+    background: var(--pb-btn-bg);
+    color: var(--pb-btn-fg);
+}
+.pb-btn--primary:hover { background: var(--pb-btn-hov); }
+.pb-btn:focus-visible {
+    outline: 1px solid var(--vscode-focusBorder, var(--pb-progress));
+    outline-offset: 2px;
+}
+</style>
+<div id="pb_chrome" aria-hidden="false">
+    <div class="pb-overlay pb-overlay--loading" role="status" aria-live="polite">
+        <div class="pb-spinner" aria-hidden="true">
+            <span class="pb-spinner__arc pb-spinner__arc--outer"></span>
+            <span class="pb-spinner__arc pb-spinner__arc--inner"></span>
+            <span class="pb-spinner__dot" aria-hidden="true"></span>
+        </div>
+        <p class="pb-status">Loading image…</p>
+        <p class="pb-caption" id="pb_caption">${escapedFilename}</p>
+    </div>
+    <div class="pb-overlay pb-overlay--error" role="alert" aria-live="assertive">
+        <div class="pb-error-card">
+            <p class="pb-error-title">Couldn't open this image</p>
+            <p class="pb-error-message" id="pb_error_message">Unknown error</p>
+            <div class="pb-error-actions">
+                <button type="button" class="pb-btn pb-btn--primary" id="pb_retry">Retry</button>
+            </div>
+        </div>
+    </div>
+</div>
+<script src="${shimUri}"></script>
+`;
+
+    // Set initial data-state="loading" on <body>. Match the upstream <body>
+    // tag (no attributes today, but be defensive about future additions).
+    html = html.replace(
+        /<body(\s[^>]*)?>/i,
+        (_match, attrs: string | undefined) => {
+            const existing = (attrs || '').trim();
+            return `<body data-state="loading"${existing ? ' ' + existing : ''}>`;
+        }
+    );
+
+    // Inject chrome immediately before the closing </body>.
+    html = html.replace(/<\/body>/i, chrome + '</body>');
+
+    return html;
+}
+
+function htmlEscape(s: string): string {
+    return s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
