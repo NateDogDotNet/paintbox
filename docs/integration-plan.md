@@ -10,12 +10,14 @@ exit criteria so work sessions can start and stop cleanly.
 **Goal:** Get the miniPaint source into the repo and confirm it loads in a browser.
 
 **Tasks:**
-1. Decide: committed copy vs git submodule (see `docs/architecture.md` — recommendation
-   is committed copy at pinned version).
-2. Either:
-   - `git submodule add https://github.com/viliusle/miniPaint vendor/minipaint` and
-     `git submodule update --init`, OR
-   - Download the v4.14.3 release and copy into `vendor/minipaint/`.
+1. Download the v4.14.3 release and copy into `vendor/minipaint/`.
+   Vendoring strategy is committed copy — decision recorded in `docs/decisions.md`.
+   ```bash
+   cd /tmp
+   curl -L https://github.com/viliusle/miniPaint/archive/refs/tags/v4.14.3.tar.gz \
+     | tar xz
+   cp -r miniPaint-4.14.3/* /path/to/paintbox/vendor/minipaint/
+   ```
 3. Confirm miniPaint opens locally: `cd vendor/minipaint && npx serve .` → open in browser.
 4. Confirm `MIT-LICENSE.txt` is present in `vendor/minipaint/` (required for
    `THIRD_PARTY_LICENSES.md` completeness).

@@ -30,20 +30,25 @@ generic. `paintbox` is distinct, memorable, available on npm as of 2026-04-27.
 
 ---
 
-**2026-04-27 — priority: "option" not "default" for customEditors**
+**2026-04-27 — Custom editor priority: `option`**
 
-The extension uses `priority: "option"` so it shows up as an alternative in "Open With"
-rather than hijacking VS Code's built-in image preview for every PNG. Can be changed to
-`"default"` if Nathan wants paintbox to be the automatic opener.
+Confirmed: `priority: "option"` in `contributes.customEditors`. paintbox appears in
+"Open With" but does not hijack VS Code's default image preview. Users opt in per-file.
+Change to `"default"` if you want paintbox to take over automatically.
 
 ---
 
-**2026-04-27 — miniPaint vendoring decision deferred to Phase 1**
+**2026-04-27 — miniPaint vendoring: committed copy at v4.14.3**
 
-Two options remain open: committed copy vs git submodule. The save-hook patch to
-miniPaint's source complicates the submodule approach (requires a patched fork or a
-runtime shim). Lean toward committed copy at pinned version for simplicity. Decide
-when Phase 1 starts.
+Committed copy in `vendor/minipaint/` at the pinned version, not a git submodule.
+Reasoning: the save-hook patch modifies miniPaint's `File_save` source — patching
+a submodule requires either a separate fork repo or a detached-HEAD commit, neither of
+which is visible to anyone reading this repo. A committed copy keeps the patch inline
+and obvious. miniPaint is single-file deployable with no build step to maintain.
+Pinned-version reproducibility is trivial: the version is whatever Nathan copied in.
+Upstream updates become a deliberate `cp -r` + `git diff` review, which is the right
+workflow when local patches sit on top. MIT compliance is identical either way;
+`THIRD_PARTY_LICENSES.md` handles attribution regardless.
 
 ---
 

@@ -4,7 +4,7 @@
   "description": "Full-featured layered image editor (powered by miniPaint) with proper save-to-disk for code-server and VS Code.",
   "version": "0.0.1",
   "private": true,
-  "publisher": "wegener",
+  "publisher": "NateDogDotNet",
   "license": "MIT",
   "engines": {
     "vscode": "^1.87.0"

@@ -77,8 +77,9 @@ This extension is powered by **miniPaint** by Vilius Sutkus '89.
 Source: https://github.com/viliusle/miniPaint  
 License: MIT
 
-miniPaint's license notice is preserved in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)
-and will be bundled inside the VSIX.
+miniPaint is vendored at `vendor/minipaint/` (committed copy, pinned to v4.14.3). Its
+license notice is preserved in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)
+and bundled inside the VSIX.
 
 ## License
 
