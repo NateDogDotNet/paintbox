@@ -1,11 +1,15 @@
 {
   "name": "paintbox",
-  "displayName": "Paintbox — Image Editor",
-  "description": "Full-featured layered image editor (powered by miniPaint) with proper save-to-disk for code-server and VS Code.",
-  "version": "0.0.7",
-  "private": true,
+  "displayName": "miniPaint — Image Editor for VS Code",
+  "description": "miniPaint by ViliusL, packaged as a VS Code custom editor with proper save-to-disk for code-server. The editor is upstream MIT work; this extension provides the VS Code integration.",
+  "version": "0.1.0",
   "publisher": "NateDogDotNet",
   "license": "MIT",
+  "icon": "images/icon.png",
+  "homepage": "https://github.com/NateDogDotNet/paintbox#readme",
+  "bugs": {
+    "url": "https://github.com/NateDogDotNet/paintbox/issues"
+  },
   "engines": {
     "vscode": "^1.87.0"
   },
@@ -53,10 +57,15 @@
     "@types/vscode": "^1.87.0",
     "@types/node": "^20.0.0",
     "@types/mocha": "^10.0.6",
+    "@typescript-eslint/eslint-plugin": "^8.59.1",
+    "@typescript-eslint/parser": "^8.59.1",
     "@vscode/test-electron": "^2.4.0",
-    "mocha": "^10.4.0",
-    "typescript": "^5.4.0",
     "@vscode/vsce": "^2.26.0",
-    "ovsx": "^0.9.0"
+    "eslint": "^8.57.1",
+    "mocha": "^10.4.0",
+    "ovsx": "^0.9.0",
+    "playwright": "^1.59.1",
+    "sharp": "^0.33.5",
+    "typescript": "^5.4.0"
   }
 }

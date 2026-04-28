@@ -1,7 +1,11 @@
-# paintbox
+# miniPaint for VS Code
+*npm id: `paintbox` · GitHub: [NateDogDotNet/paintbox](https://github.com/NateDogDotNet/paintbox)*
 
-A VS Code extension that embeds [miniPaint](https://github.com/viliusle/miniPaint) as a
-custom editor — layers, filters, selections, and proper save-to-disk — inside code-server.
+**This is [miniPaint](https://github.com/viliusle/miniPaint) packaged as a VS Code extension.** The image editor — every tool, every filter, every menu, every pixel of UX — is ViliusL's work, MIT-licensed and unchanged in spirit. What this repository adds is the *integration*: a `CustomEditorProvider` that opens a real file from disk, hands its bytes to miniPaint, captures the save event, and writes the edited bytes back. That round-trip is the missing piece for code-server users — neither Photopea's extension nor luna-paint solve it; this does.
+
+**Why this distinction matters:** the heavy lifting (a full layered photo editor) is upstream. The thin lifting (a few hundred lines of TypeScript host code, a webview shim, three bundle text-replaces) is mine. Use the search bar; install the extension; if you love it, star [viliusle/miniPaint](https://github.com/viliusle/miniPaint).
+
+![miniPaint editing a screenshot inside VS Code](images/screenshot.png)
 
 ## Why this exists
 
@@ -81,9 +85,11 @@ For everything else, file an issue: https://github.com/NateDogDotNet/paintbox/is
 
 ## miniPaint credit
 
-This extension is powered by **miniPaint** by Vilius Sutkus '89.  
+This extension is powered by **miniPaint** by ViliusL.  
 Source: https://github.com/viliusle/miniPaint  
 License: MIT
+
+Icon adapted from miniPaint by ViliusL (MIT).
 
 miniPaint is vendored at `vendor/minipaint/` (committed copy, pinned to v4.14.3). Its
 license notice is preserved in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md)

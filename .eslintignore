@@ -1,0 +1,4 @@
+out/
+vendor/
+node_modules/
+*.vsix

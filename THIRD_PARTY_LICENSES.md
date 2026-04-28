@@ -1,5 +1,9 @@
 # Third-Party Licenses
 
+miniPaint is the substantive work in this distribution. The VS Code integration
+code in `src/` and `scripts/` is original to this repository (also MIT-licensed,
+see `LICENSE`).
+
 ## miniPaint
 
 **Project:** miniPaint  
