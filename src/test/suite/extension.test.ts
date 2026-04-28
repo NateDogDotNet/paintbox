@@ -320,6 +320,10 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
         // Phase 6.8 added the SAVE_TYPES GIF+BMP strip patch + bumped the
         // header to v2; assertions below cover both patches plus the TIFF
         // regression guard.
+        //
+        // Phase 6.9 added the File-menu Print-entry strip patch + bumped the
+        // header to v3; assertions below cover all three patches plus the
+        // TIFF + Quick Save regression guards.
 
         const repoRoot = path.resolve(__dirname, '../../..');
         const patchedPath = path.join(repoRoot, 'out', 'webview', 'minipaint-bundle.patched.js');
@@ -335,7 +339,7 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
         const firstLine = contents.split('\n', 1)[0];
         assert.strictEqual(
             firstLine,
-            '/* PAINTBOX-BUNDLE-PATCH v2: p\\(\\)\\.saveAs\\( replaced 8x; SAVE_TYPES GIF+BMP entries removed */',
+            '/* PAINTBOX-BUNDLE-PATCH v3: p\\(\\)\\.saveAs\\( replaced 8x; SAVE_TYPES GIF+BMP entries removed; File menu Print entry removed */',
             `unexpected first line of patched bundle: ${firstLine}`
         );
 
@@ -350,7 +354,7 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
         );
 
         // Zero remaining bare `p().saveAs(` (after stripping the header).
-        const header = '/* PAINTBOX-BUNDLE-PATCH v2: p\\(\\)\\.saveAs\\( replaced 8x; SAVE_TYPES GIF+BMP entries removed */\n';
+        const header = '/* PAINTBOX-BUNDLE-PATCH v3: p\\(\\)\\.saveAs\\( replaced 8x; SAVE_TYPES GIF+BMP entries removed; File menu Print entry removed */\n';
         const body = contents.startsWith(header) ? contents.slice(header.length) : contents;
         const bareRe = /(?:^|[^)])p\(\)\.saveAs\(/g;
         const bareMatches = body.match(bareRe);
@@ -377,6 +381,21 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
             (contents.match(/TIFF:"Tag Image File Format"/g) || []).length,
             1,
             'TIFF SAVE_TYPES entry must survive the GIF+BMP removal'
+        );
+
+        // Phase 6.9: File-menu Print entry must be gone.
+        assert.strictEqual(
+            (contents.match(/name:"Print"/g) || []).length,
+            0,
+            'File-menu Print entry must be removed from patched bundle'
+        );
+        // Regression guard: Quick Save was the entry immediately following
+        // the Print entry's divider — a miss-bounded substring patch would
+        // chew through it.
+        assert.strictEqual(
+            (contents.match(/name:"Quick Save"/g) || []).length,
+            1,
+            'Quick Save menu entry must survive the Print removal'
         );
 
         // Activation should have run cleanly (the EDH would have failed loud
@@ -596,117 +615,4 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
             'webviewReady must NOT be posted when window globals are missing');
     });
 
-    // ---------- Test 6.6e: shim window.print monkey-patch (Phase 6.6 §D4) -
-
-    test('6.6e — shim monkey-patches window.print to call FileSave.save_action with __print__ sentinel', () => {
-        // Phase 6.6 §D4: shim's IIFE installs a `window.print` override that
-        // (1) stashes `__pbPendingRequestId='__print__'` and
-        // (2) calls `window.FileSave.save_action({…}, true)`.
-        // The bridge then attaches the sentinel to the saveResult, and the
-        // host's saveResult handler routes `__print__` to tmpdir + openExternal.
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const vm = require('vm');
-        const shimPath = path.resolve(__dirname, '../../webview/shim.js');
-        const shimSource = fs.readFileSync(shimPath, 'utf8');
-
-        // Stub FileSave so we can capture save_action calls.
-        const saveActionCalls: Array<{ user_response: unknown; autoname: boolean }> = [];
-        const fakeFileSave = {
-            save_action: (user_response: unknown, autoname: boolean) => {
-                saveActionCalls.push({ user_response, autoname });
-            },
-        };
-
-        const fakeVscode = {
-            postMessage: () => undefined,
-            getState: () => undefined,
-            setState: () => undefined,
-        };
-
-        const eventListeners: Record<string, Array<(e: unknown) => void>> = {};
-        const fakeDocument = {
-            readyState: 'loading',
-            body: { dataset: {} as Record<string, string> },
-            getElementById: (_id: string) => null,
-            addEventListener: (
-                ev: string,
-                cb: (e: unknown) => void,
-                _opts?: unknown
-            ) => {
-                (eventListeners[ev] = eventListeners[ev] || []).push(cb);
-            },
-        };
-        // FileSave is set on window BEFORE the shim's IIFE runs — production
-        // ordering has the bundle run first, but in this unit test we don't
-        // run the bundle, so we put FileSave in place directly.
-        const fakeWindow: { [k: string]: unknown } = {
-            addEventListener: (
-                ev: string,
-                cb: (e: unknown) => void,
-                _opts?: unknown
-            ) => {
-                (eventListeners[ev] = eventListeners[ev] || []).push(cb);
-            },
-            __pbTestVsCode: fakeVscode,
-            FileSave: fakeFileSave,
-        };
-
-        const sandbox: { [k: string]: unknown } = {
-            window: fakeWindow,
-            document: fakeDocument,
-            Promise,
-            setTimeout,
-            requestAnimationFrame: (cb: () => void) => { cb(); },
-            console: { log: () => undefined, error: () => undefined, warn: () => undefined },
-            Array,
-            Object,
-            Error,
-            JSON,
-            String,
-            acquireVsCodeApi: () => {
-                throw new Error('acquireVsCodeApi() should not be called when __pbTestVsCode is set');
-            },
-        };
-        sandbox.globalThis = sandbox;
-        vm.createContext(sandbox);
-        vm.runInContext(shimSource, sandbox, { filename: 'shim.js' });
-
-        // The IIFE has run; window.print should now be the patched version.
-        const patchedPrint = (fakeWindow as { print?: () => void }).print;
-        assert.strictEqual(typeof patchedPrint, 'function',
-            'shim should install window.print as a function');
-
-        // Pre-condition: __pbPendingRequestId not set yet.
-        assert.strictEqual(
-            (fakeWindow as { __pbPendingRequestId?: string }).__pbPendingRequestId,
-            undefined,
-            '__pbPendingRequestId should be unset before window.print()'
-        );
-
-        patchedPrint!();
-
-        // Sentinel stashed.
-        assert.strictEqual(
-            (fakeWindow as { __pbPendingRequestId?: string }).__pbPendingRequestId,
-            '__print__',
-            'window.print must stash __pbPendingRequestId="__print__"'
-        );
-
-        // save_action called exactly once with the expected payload.
-        assert.strictEqual(saveActionCalls.length, 1,
-            `expected exactly 1 save_action call; saw ${saveActionCalls.length}`);
-        const call = saveActionCalls[0];
-        assert.strictEqual(call.autoname, true,
-            'save_action autoname argument should be true');
-        const ur = call.user_response as {
-            name: string; type: string; quality: number;
-            layers: string; delay: number; calc_size: boolean;
-        };
-        assert.strictEqual(ur.name, 'print.png', 'user_response.name should be print.png');
-        assert.strictEqual(ur.type, 'PNG', 'user_response.type should be PNG');
-        assert.strictEqual(ur.quality, 90, 'user_response.quality should be 90');
-        assert.strictEqual(ur.layers, 'All', 'user_response.layers should be All');
-        assert.strictEqual(ur.delay, 400, 'user_response.delay should be 400');
-        assert.strictEqual(ur.calc_size, false, 'user_response.calc_size should be false');
-    });
 });

@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import * as os from 'os';
 import * as crypto from 'crypto';
 import { buildWebviewHtml } from './webviewHtml';
 import { SaveCorrelator } from './saveCorrelator';
@@ -330,23 +329,12 @@ export class PaintboxEditorProvider
                         this._correlator.handleSaveResult(requestId, new Uint8Array(bytesArr));
                         return;
                     }
-                    // Path 2 — Print sentinel (Phase 6.6 §D4): the shim's
-                    // monkey-patched `window.print` stashes
-                    // `__pbPendingRequestId='__print__'` then calls
-                    // `save_action`; the bridge attaches the sentinel to the
-                    // resulting saveResult. Write to a tmp PNG and ask VS Code
-                    // to open it externally so the user's default image viewer
-                    // (with its own Print menu) takes over.
-                    if (requestId === '__print__') {
-                        await this._handlePrintSaveResult(msg);
-                        return;
-                    }
-                    // Path 3 — unsolicited save (Phase 6.6 §D2): user clicked
+                    // Path 2 — unsolicited save (Phase 6.6 §D2): user clicked
                     // File → Export or File → Save As inside the webview. No
-                    // pending host request, no print sentinel. Prompt the user
-                    // for a destination via showSaveDialog and write the bytes
-                    // there. NEVER write silently — the user thinks "download",
-                    // not "overwrite the workspace file."
+                    // pending host request. Prompt the user for a destination
+                    // via showSaveDialog and write the bytes there. NEVER
+                    // write silently — the user thinks "download", not
+                    // "overwrite the workspace file."
                     await this._handleUnsolicitedSaveResult(msg, document.uri);
                     return;
                 }
@@ -678,46 +666,6 @@ export class PaintboxEditorProvider
         } catch (err: unknown) {
             const errMsg = err instanceof Error ? err.message : String(err);
             vscode.window.showErrorMessage(`Paintbox: save failed: ${errMsg}`);
-        }
-    }
-
-    /**
-     * Phase 6.7 §1: handle a saveResult tagged with the `__print__` sentinel.
-     * The shim's monkey-patched `window.print` reroutes through `save_action`
-     * and the existing bridge; this side writes the bytes to a tmp PNG and
-     * surfaces an actionable toast pointing the user at the artifact.
-     *
-     * Phase 6.6 originally called `vscode.env.openExternal` here, but that
-     * silently no-ops in code-server (the server-side extension host has no
-     * graphical session, so the URI-dispatch goes nowhere yet `openExternal`
-     * still resolves `true`). The success toast was a lie. Phase 6.7 collapses
-     * to a single branch: always show the saved path + a "Reveal in Explorer"
-     * action that runs the built-in `revealFileInOS` command (which works
-     * correctly in code-server). Local VS Code users still get the path in the
-     * toast text if `revealFileInOS` doesn't behave as expected on their host.
-     */
-    private async _handlePrintSaveResult(
-        msg: { [k: string]: unknown }
-    ): Promise<void> {
-        const bytesArr = Array.isArray(msg.bytes) ? (msg.bytes as number[]) : [];
-        const tmpPath = path.join(
-            os.tmpdir(),
-            'paintbox-print-' + crypto.randomUUID() + '.png'
-        );
-        const tmpUri = vscode.Uri.file(tmpPath);
-        try {
-            await vscode.workspace.fs.writeFile(tmpUri, new Uint8Array(bytesArr));
-        } catch (err: unknown) {
-            const errMsg = err instanceof Error ? err.message : String(err);
-            vscode.window.showErrorMessage(`Paintbox: print failed: ${errMsg}`);
-            return;
-        }
-        const choice = await vscode.window.showInformationMessage(
-            'Paintbox: print artifact saved at ' + tmpPath,
-            'Reveal in Explorer'
-        );
-        if (choice === 'Reveal in Explorer') {
-            await vscode.commands.executeCommand('revealFileInOS', tmpUri);
         }
     }
 

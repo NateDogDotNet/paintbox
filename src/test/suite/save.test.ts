@@ -1049,14 +1049,12 @@ suite('Paintbox Phase 6 — Save As + Format Conversion', () => {
 /**
  * Phase 6.6 tests (see .orchestrator/phase6.6-design.md §Tests).
  *
- *   6.6b — Unsolicited saveResult (no matching requestId, not __print__) →
- *          showSaveDialog returns a tmp Uri → file written; SHA-256 match;
- *          info toast asserted.
+ *   6.6b — Unsolicited saveResult (no matching requestId) → showSaveDialog
+ *          returns a tmp Uri → file written; SHA-256 match; info toast
+ *          asserted.
  *   6.6c — Cancelled showSaveDialog → no file written, no error toast.
- *   6.6d — saveResult with requestId='__print__' → tmp PNG written;
- *          openExternal called with vscode.Uri.file(tmpPath); info toast.
  */
-suite('Paintbox Phase 6.6 — Unsolicited saveResult + Print sentinel', () => {
+suite('Paintbox Phase 6.6 — Unsolicited saveResult', () => {
     interface PostedMessage { type: string; [k: string]: unknown }
 
     interface Harness {
@@ -1286,111 +1284,4 @@ suite('Paintbox Phase 6.6 — Unsolicited saveResult + Print sentinel', () => {
         }
     });
 
-    // ---------- Test 6.6d — __print__ sentinel writes tmp PNG + actionable toast
-
-    test('6.6d — __print__ requestId writes tmp PNG and surfaces actionable toast', async function () {
-        this.timeout(10_000);
-        const h = await makeHarness(FIXTURE_1x1_PNG, 'open.png');
-
-        // Phase 6.7: openExternal is no longer called from the print path. We
-        // stub showInformationMessage to capture the toast (text + button
-        // label) AND simulate the user clicking the "Reveal in Explorer"
-        // action. The print path then runs `vscode.commands.executeCommand
-        // ('revealFileInOS', tmpUri)`, which we stub to capture the call.
-        const origShowInfo = vscode.window.showInformationMessage;
-        const infoMessages: string[] = [];
-        const infoButtons: string[][] = [];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (vscode.window as any).showInformationMessage = async (msg: string, ...items: string[]) => {
-            infoMessages.push(msg);
-            infoButtons.push(items);
-            // Simulate the user clicking "Reveal in Explorer" if it was
-            // offered, so we can assert the executeCommand follow-up.
-            if (items.includes('Reveal in Explorer')) {
-                return 'Reveal in Explorer';
-            }
-            return undefined;
-        };
-        const origShowError = vscode.window.showErrorMessage;
-        const errorMessages: string[] = [];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (vscode.window as any).showErrorMessage = async (msg: string) => {
-            errorMessages.push(msg);
-            return undefined;
-        };
-        const origExecuteCommand = vscode.commands.executeCommand;
-        const executeCommandCalls: Array<{ command: string; args: unknown[] }> = [];
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (vscode.commands as any).executeCommand = async (command: string, ...args: unknown[]) => {
-            executeCommandCalls.push({ command, args });
-            return undefined;
-        };
-
-        try {
-            const webviewBytes = await fs.promises.readFile(FIXTURE_2x2_PNG);
-
-            await Promise.resolve(h.messageHandler({
-                type: 'saveResult',
-                requestId: '__print__',
-                bytes: Array.from(webviewBytes),
-                format: 'PNG',
-                filename: 'print.png',
-                mime: 'image/png',
-            }));
-
-            // Allow the awaited writeFile + showInformationMessage to settle.
-            await new Promise<void>((resolve) => setTimeout(resolve, 50));
-
-            // Info toast asserted: text mentions tmp path, button label was
-            // passed as a second argument.
-            assert.strictEqual(infoMessages.length, 1,
-                `expected 1 showInformationMessage call; saw ${infoMessages.length}`);
-            const printToast = infoMessages[0];
-            assert.match(printToast, /print artifact saved at/,
-                `expected toast text to match /print artifact saved at/; got: ${printToast}`);
-            // Extract the tmp path from the toast text and verify it's under
-            // os.tmpdir() with the expected paintbox-print-*.png basename.
-            const tmpPath = printToast.replace(/^Paintbox: print artifact saved at /, '');
-            assert.ok(tmpPath.startsWith(os.tmpdir()),
-                `tmp path should be under os.tmpdir(); got: ${tmpPath}`);
-            assert.match(path.basename(tmpPath), /^paintbox-print-.*\.png$/,
-                `tmp filename should match paintbox-print-*.png; got: ${path.basename(tmpPath)}`);
-
-            // Button label asserted: 'Reveal in Explorer' must have been
-            // passed as a positional arg to showInformationMessage.
-            assert.deepStrictEqual(infoButtons[0], ['Reveal in Explorer'],
-                `expected ['Reveal in Explorer'] button label; got: ${JSON.stringify(infoButtons[0])}`);
-
-            // The tmp PNG was actually written; bytes match the webview emit.
-            const onDisk = await fs.promises.readFile(tmpPath);
-            assert.strictEqual(
-                sha256(onDisk),
-                sha256(webviewBytes),
-                'tmp PNG bytes must hash-match the webview-emitted bytes'
-            );
-
-            // Simulated button click: revealFileInOS was invoked with the tmp Uri.
-            assert.strictEqual(executeCommandCalls.length, 1,
-                `expected 1 executeCommand call; saw ${executeCommandCalls.length}`);
-            assert.strictEqual(executeCommandCalls[0].command, 'revealFileInOS',
-                `expected revealFileInOS command; got: ${executeCommandCalls[0].command}`);
-            const revealUri = executeCommandCalls[0].args[0] as vscode.Uri;
-            assert.strictEqual(revealUri.fsPath, tmpPath,
-                `revealFileInOS Uri must equal the tmp path; got: ${revealUri.fsPath}`);
-
-            assert.strictEqual(errorMessages.length, 0,
-                `unexpected error toast: ${JSON.stringify(errorMessages)}`);
-
-            // Cleanup the tmp artifact (best-effort).
-            await fs.promises.unlink(tmpPath).catch(() => undefined);
-        } finally {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (vscode.window as any).showInformationMessage = origShowInfo;
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (vscode.window as any).showErrorMessage = origShowError;
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (vscode.commands as any).executeCommand = origExecuteCommand;
-            await h.cleanup();
-        }
-    });
 });

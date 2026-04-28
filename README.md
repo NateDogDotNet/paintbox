@@ -76,7 +76,6 @@ any code-server installation.
 These are environment-imposed quirks of running miniPaint inside a VS Code webview, not bugs in paintbox itself:
 
 - **GIF and BMP files** open with VS Code's default image preview, not paintbox. miniPaint encodes GIFs via a Web Worker that the webview's CSP blocks, and most browsers don't ship a native BMP encoder. Rather than fail at save time, paintbox no longer claims these formats; right-click → Open With → Image Preview to view them.
-- **Print** writes a temporary PNG and shows a toast with the path plus a "Reveal in Explorer" button. There's no system print dialog inside a webview running on a remote server. Open the file from your local machine (or from the VS Code file tree) and print from there.
 
 For everything else, file an issue: https://github.com/NateDogDotNet/paintbox/issues
 

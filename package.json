@@ -2,7 +2,7 @@
   "name": "paintbox",
   "displayName": "Paintbox — Image Editor",
   "description": "Full-featured layered image editor (powered by miniPaint) with proper save-to-disk for code-server and VS Code.",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "private": true,
   "publisher": "NateDogDotNet",
   "license": "MIT",

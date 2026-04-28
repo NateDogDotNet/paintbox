@@ -176,38 +176,6 @@ type HostMessage = LoadMessage | { type: string; [k: string]: unknown };
     };
     (window as unknown as { __pbBridge: PbBridge }).__pbBridge = pbBridge;
 
-    // Phase 6.6 §D4 — Print intercept.
-    // VS Code webviews silently block `window.print()`; miniPaint's print.js
-    // is literally `window.print()`, so File → Print does nothing. Reroute it
-    // through the existing save bridge with a sentinel requestId. The host's
-    // saveResult handler picks up `requestId === '__print__'`, writes a tmp
-    // PNG, and asks VS Code to open it in the user's default image viewer
-    // (which has its own Print menu).
-    //
-    // Installed BEFORE the bundle runs (we're inside the IIFE that runs from
-    // the head <script>), so by the time miniPaint's File_print_class binds
-    // its menu item, our patched `window.print` is already in place.
-    (window as { print?: () => void }).print = function pbPrint(): void {
-        const fileSave = (window as unknown as { FileSave?: MiniPaintFileSave }).FileSave;
-        if (!fileSave || typeof fileSave.save_action !== 'function') {
-            // Called too early — bundle hasn't installed FileSave yet. Fail
-            // soft; the print menu fires after init in practice, but be
-            // defensive against future ordering changes.
-            // eslint-disable-next-line no-console
-            console.warn('[paintbox] window.print called before FileSave was available; skipping');
-            return;
-        }
-        (window as unknown as { __pbPendingRequestId?: string }).__pbPendingRequestId = '__print__';
-        fileSave.save_action({
-            name: 'print.png',
-            type: 'PNG',
-            quality: 90,
-            layers: 'All',
-            delay: 400,
-            calc_size: false,
-        }, /* autoname */ true);
-    };
-
     type State = 'loading' | 'ready' | 'error';
     interface SetStatePayload {
         filename?: string;

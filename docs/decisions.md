@@ -611,4 +611,65 @@ SAVE_TYPES site. Bumped to v0.0.6.
 
 ---
 
+**2026-04-28 — Phase 6.9 hide Print from miniPaint File menu; remove dead Print code paths**
+
+Burn-in of v0.0.6 surfaced that the Phase 6.7 "Print writes a tmp PNG +
+Reveal in Explorer" UX was still confusing — users expect "Print" to mean
+"system print dialog", not "saved a temp file somewhere." Rather than keep
+chasing a real Print fix that VS Code's webview sandbox structurally
+forbids (`window.print()` is silently blocked), the user chose to hide the
+entry entirely: no menu item, no Ctrl+P shortcut, nothing for the user to
+click that doesn't do what the label says.
+
+Sub-decisions:
+
+1. **Bundle text-replace patch (third patch on `patchMinipaintBundle`).**
+   A precise-substring patch removes
+   `{name:"Print",ellipsis:!0,shortcut:"Ctrl+P",target:"file/print.print"},`
+   from miniPaint's File menu definition (verified at byte ~63868, exactly
+   1 occurrence). Same fail-loud convention as Phases 4 + 6.8: assert
+   exactly 1 occurrence before patching, throw on 0 or >1. Header bumped
+   to v3 (`PAINTBOX-BUNDLE-PATCH v3: p\(\)\.saveAs\( replaced 8x; SAVE_TYPES
+   GIF+BMP entries removed; File menu Print entry removed`).
+   `verifyPatchedBundle` now asserts 0 occurrences of `name:"Print"` AND
+   that the adjacent `name:"Quick Save"` entry survives — regression guard
+   against an overshot substring patch (Quick Save is the menu item that
+   immediately follows the Print entry's divider in the upstream menu).
+   Translation strings elsewhere in the bundle (8+ matches at byte
+   989910+) are unaffected — they don't match the exact menu-entry literal.
+
+2. **Remove dead code paths.** Per CLAUDE.md "no half-finished
+   implementations": with the menu entry gone and Ctrl+P unbound, nothing
+   in miniPaint will reach `window.print()` anymore. The shim's
+   `window.print` monkey-patch (Phase 6.6 §D4) is REMOVED. The host's
+   `_handlePrintSaveResult` method and the `case 'saveResult'` branch that
+   routed `__print__` requestId to it (Phase 6.7) are REMOVED. The
+   now-unused `import * as os from 'os'` is dropped from
+   `editorProvider.ts`. `crypto` import stays — `_writeViaWebview` still
+   uses `crypto.randomUUID()` for the host-initiated save requestId.
+   Tests 6.6d (host print path integration) and 6.6e (shim
+   window.print monkey-patch sandbox unit) are REMOVED, not skipped.
+
+3. **README "Known limitations" section.** The Print bullet is dropped
+   entirely. With Print gone from the menu there's nothing for the
+   limitation to limit. The remaining content (the GIF/BMP-via-default-
+   preview paragraph from Phase 6.8) stays.
+
+**Why text-replace and not a source patch:** same reasoning as Phases 4 +
+6.8 — `vendor/minipaint/src/js/modules/file/save.js` and the menu
+definition source are not loaded at runtime (`index.html` only loads
+`dist/bundle.js`). A source-only patch would be dead text. Bundle stays
+byte-identical to upstream (`d084e26…83356`); the patched bundle in
+`out/webview/` is the only mutated artifact.
+
+Test count: 34 → 32 (deleted 6.6d + 6.6e). Test 4c updated to assert the
+v3 header, the Print entry gone, and the Quick Save regression guard.
+
+Bundle `vendor/minipaint/dist/bundle.js` SHA-256 unchanged
+(`d084e26…83356`); third patch surface is in `out/webview/` only.
+`patchMinipaintBundle.ts` patch surface count: 8 saveAs sites + 1
+SAVE_TYPES site + 1 File-menu Print site. Bumped to v0.0.7.
+
+---
+
 *(Add new entries at the bottom, newest last.)*

@@ -16,6 +16,12 @@
 // which most browsers don't ship. Hide them rather than leave a footgun.
 // Same fail-loud convention: assert exactly 1 occurrence before patching.
 //
+// Phase 6.9 adds a THIRD text-replace patch: remove the File → Print menu
+// entry (and the Ctrl+P shortcut binding it carries). VS Code webviews
+// silently block `window.print()`, so the entry was a dead-end UX. Same
+// fail-loud convention; same regression guard via the adjacent "Quick Save"
+// menu item surviving.
+//
 // Per orchestrator override Q9 file location: this helper lives in src/ (built
 // by the host tsconfig.json) because it uses Node `fs`/`path`. It must NOT live
 // in src/webview/ — that build is browser-only (lib: ES2020+DOM, types: []).
@@ -35,10 +41,22 @@ const SAVE_TYPES_GIF_BMP =
     'GIF:"Graphics Interchange Format",BMP:"Windows Bitmap",';
 export const SAVE_TYPES_GIF_BMP_EXPECTED_SITES = 1;
 
+// Phase 6.9: literal substring — match the File menu's Print entry exactly.
+// Adjacent context (verified at byte ~63868):
+//   …target:"file/save.save_data_url"},<THIS>{divider:!0},{name:"Quick Save"…
+// Removing this substring cleanly elides the Print menu entry and its
+// Ctrl+P keyboard binding. The language-file occurrences of "Print" elsewhere
+// in the bundle (translations) are unaffected — they don't match this exact
+// menu-entry literal.
+const FILE_MENU_PRINT_ENTRY =
+    '{name:"Print",ellipsis:!0,shortcut:"Ctrl+P",target:"file/print.print"},';
+export const FILE_MENU_PRINT_ENTRY_EXPECTED_SITES = 1;
+
 export const PAINTBOX_HEADER =
-    '/* PAINTBOX-BUNDLE-PATCH v2: ' +
+    '/* PAINTBOX-BUNDLE-PATCH v3: ' +
     'p\\(\\)\\.saveAs\\( replaced ' + EXPECTED_SITES + 'x; ' +
-    'SAVE_TYPES GIF+BMP entries removed */\n';
+    'SAVE_TYPES GIF+BMP entries removed; ' +
+    'File menu Print entry removed */\n';
 
 function bundleSrc(extensionRoot: string): string {
     return path.join(extensionRoot, 'vendor', 'minipaint', 'dist', 'bundle.js');
@@ -106,11 +124,27 @@ export function patchMinipaintBundle(extensionRoot: string): string {
         );
     }
 
+    // Phase 6.9: File-menu Print-entry integrity check. Same fail-loud
+    // contract: exactly 1 occurrence; anything else means upstream
+    // rearranged the menu definition and we need to re-audit.
+    const printEntryCount = countOccurrences(original, FILE_MENU_PRINT_ENTRY);
+    if (printEntryCount !== FILE_MENU_PRINT_ENTRY_EXPECTED_SITES) {
+        throw new Error(
+            'Paintbox: miniPaint bundle File-menu Print-entry integrity check failed. ' +
+            'Expected ' + FILE_MENU_PRINT_ENTRY_EXPECTED_SITES +
+            ' occurrence of the Print menu entry, found ' +
+            printEntryCount + '. ' +
+            'The vendored bundle may have been updated upstream — ' +
+            're-audit before proceeding.'
+        );
+    }
+
     const patched = PAINTBOX_HEADER + original
         .replace(SAVE_AS_PATTERN, PATCHED_REPLACEMENT)
-        // Plain-string .replace (no regex) — the literal substring is
-        // unambiguous and contains no regex metachars worth defending against.
-        .replace(SAVE_TYPES_GIF_BMP, '');
+        // Plain-string .replace (no regex) — the literal substrings are
+        // unambiguous and contain no regex metachars worth defending against.
+        .replace(SAVE_TYPES_GIF_BMP, '')
+        .replace(FILE_MENU_PRINT_ENTRY, '');
 
     // Idempotent fast path: don't rewrite if the file already matches.
     if (fs.existsSync(out) && fs.readFileSync(out, 'utf8') === patched) {
@@ -199,5 +233,17 @@ export function verifyPatchedBundle(extensionRoot: string): void {
     // it's still present so that failure mode fails the build, not a user.
     if (countOccurrences(contents, 'TIFF:"Tag Image File Format"') !== 1) {
         return fail('expected adjacent TIFF SAVE_TYPES entry to survive');
+    }
+
+    // Phase 6.9: File-menu Print-entry patch verification.
+    if (countOccurrences(contents, 'name:"Print"') !== 0) {
+        return fail('expected 0 occurrences of File-menu Print entry');
+    }
+    // Regression guard: Quick Save was the entry immediately following the
+    // Print entry's divider. A miss-bounded substring patch would chew
+    // through Quick Save too. Assert it's still present so that failure
+    // mode fails the build, not a user.
+    if (countOccurrences(contents, 'name:"Quick Save"') !== 1) {
+        return fail('expected adjacent Quick Save menu entry to survive');
     }
 }
