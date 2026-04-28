@@ -71,13 +71,18 @@ export function buildWebviewHtml(
         vscode.Uri.joinPath(extensionUri, 'out', 'webview', 'minipaint-bundle.patched.js')
     ).toString();
 
+    // Phase 6.6 §D1: Search Images calls Pixabay. The API endpoint and the
+    // thumbnail/CDN images live on `pixabay.com` and `*.pixabay.com`. Both
+    // are added to `connect-src` (XHR/fetch from `$.getJSON`) AND `img-src`
+    // (the eventual `<img>` thumbnails + the chosen full image). Other
+    // directives are unchanged — Pixabay never serves scripts or fonts here.
     const csp =
         `default-src 'none'; ` +
-        `img-src ${webview.cspSource} data: blob:; ` +
+        `img-src ${webview.cspSource} data: blob: https://pixabay.com https://*.pixabay.com; ` +
         `style-src ${webview.cspSource} 'unsafe-inline'; ` +
         `font-src ${webview.cspSource}; ` +
         `script-src ${webview.cspSource}; ` +
-        `connect-src ${webview.cspSource};`;
+        `connect-src ${webview.cspSource} https://pixabay.com https://*.pixabay.com;`;
 
     const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${csp}">`;
     const baseTag = `<base href="${baseHref}">`;

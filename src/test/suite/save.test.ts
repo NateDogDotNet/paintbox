@@ -178,9 +178,10 @@ suite('Paintbox Phase 4 — Save (bridge → host)', () => {
 
     test('4b — host onDidReceiveMessage handles saveResult/saveError without throwing', async () => {
         // Drive the host message path WITHOUT spinning up a real webview.
-        // Synthesize a `saveResult` and a `saveError` message — neither has
-        // a matching pending requestId, so under Phase 5 default-4 the
-        // handler logs and ignores. Either way it must NOT throw.
+        // Synthesize a `saveResult` (no matching pending requestId — under
+        // Phase 6.6 §D2 this routes to the unsolicited-save path, so we stub
+        // showSaveDialog to return undefined / cancel) and a `saveError` —
+        // both must complete without throwing.
 
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const providerModule = require('../../editorProvider');
@@ -234,6 +235,13 @@ suite('Paintbox Phase 4 — Save (bridge → host)', () => {
         );
         assert.ok(messageHandler, 'host did not register an onDidReceiveMessage handler');
 
+        // Phase 6.6: stub showSaveDialog so the unsolicited-save path
+        // resolves to "cancel" (no toast, no write). The original
+        // showSaveDialog in test mode would either hang or pop a real dialog.
+        const origShowSaveDialog = vscode.window.showSaveDialog;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (vscode.window as any).showSaveDialog = async () => undefined;
+
         let savedThrow: unknown = undefined;
         try {
             await Promise.resolve(messageHandler!({
@@ -250,6 +258,9 @@ suite('Paintbox Phase 4 — Save (bridge → host)', () => {
             }));
         } catch (err) {
             savedThrow = err;
+        } finally {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (vscode.window as any).showSaveDialog = origShowSaveDialog;
         }
         assert.strictEqual(
             savedThrow,
@@ -1028,6 +1039,331 @@ suite('Paintbox Phase 6 — Save As + Format Conversion', () => {
         } finally {
             (vscode.window as unknown as { showWarningMessage: typeof original })
                 .showWarningMessage = original;
+            await h.cleanup();
+        }
+    });
+});
+
+// ---------- Phase 6.6 tests (unsolicited saveResult + Print sentinel) -----
+
+/**
+ * Phase 6.6 tests (see .orchestrator/phase6.6-design.md §Tests).
+ *
+ *   6.6b — Unsolicited saveResult (no matching requestId, not __print__) →
+ *          showSaveDialog returns a tmp Uri → file written; SHA-256 match;
+ *          info toast asserted.
+ *   6.6c — Cancelled showSaveDialog → no file written, no error toast.
+ *   6.6d — saveResult with requestId='__print__' → tmp PNG written;
+ *          openExternal called with vscode.Uri.file(tmpPath); info toast.
+ */
+suite('Paintbox Phase 6.6 — Unsolicited saveResult + Print sentinel', () => {
+    interface PostedMessage { type: string; [k: string]: unknown }
+
+    interface Harness {
+        provider: { __pbTestIsDirty: (uri: vscode.Uri) => boolean };
+        document: { uri: vscode.Uri; mime: string };
+        messageHandler: (m: PostedMessage) => void | Promise<void>;
+        cleanup: () => Promise<void>;
+    }
+
+    async function makeHarness(fixturePath: string, fixtureBaseName: string): Promise<Harness> {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const providerModule = require('../../editorProvider');
+        const Provider = providerModule.PaintboxEditorProvider;
+
+        const ext = vscode.extensions.getExtension('NateDogDotNet.paintbox');
+        await ext!.activate();
+
+        const extensionUri = vscode.Uri.file(REPO_ROOT);
+        const fakeContext = {
+            extensionUri,
+            extensionPath: REPO_ROOT,
+            subscriptions: [] as vscode.Disposable[],
+        } as unknown as vscode.ExtensionContext;
+        const provider = new Provider(fakeContext);
+
+        const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'paintbox-66-'));
+        const tmpFile = path.join(tmpDir, fixtureBaseName);
+        await fs.promises.copyFile(fixturePath, tmpFile);
+        const tmpUri = vscode.Uri.file(tmpFile);
+
+        const document = await provider.openCustomDocument(
+            tmpUri,
+            { backupId: undefined } as unknown as vscode.CustomDocumentOpenContext,
+            new vscode.CancellationTokenSource().token
+        );
+
+        let messageHandler: ((msg: PostedMessage) => void | Promise<void>) | undefined;
+
+        const fakeWebview = {
+            cspSource: 'vscode-webview://fake',
+            options: {} as vscode.WebviewOptions,
+            html: '',
+            asWebviewUri: (uri: vscode.Uri) =>
+                vscode.Uri.parse(`https://fake-webview.test${uri.path}`),
+            onDidReceiveMessage: (cb: (msg: PostedMessage) => void | Promise<void>) => {
+                messageHandler = cb;
+                return new vscode.Disposable(() => { messageHandler = undefined; });
+            },
+            postMessage: async (_msg: PostedMessage) => true,
+        };
+        const fakePanel = {
+            webview: fakeWebview,
+            onDidDispose: (_cb: () => void) => new vscode.Disposable(() => undefined),
+        } as unknown as vscode.WebviewPanel;
+
+        await provider.resolveCustomEditor(
+            document,
+            fakePanel,
+            new vscode.CancellationTokenSource().token
+        );
+        assert.ok(messageHandler, 'host did not register onDidReceiveMessage');
+
+        return {
+            provider: provider as Harness['provider'],
+            document: document as Harness['document'],
+            messageHandler: messageHandler!,
+            cleanup: async () => {
+                try { await fs.promises.rm(tmpDir, { recursive: true, force: true }); }
+                catch { /* best-effort */ }
+            },
+        };
+    }
+
+    function sha256(buf: Uint8Array | Buffer): string {
+        return crypto.createHash('sha256').update(buf).digest('hex');
+    }
+
+    /**
+     * Monkey-patch helper for `vscode.window.showSaveDialog` /
+     * showInformationMessage / showErrorMessage. Restored via the returned
+     * `restore()` regardless of pass/fail.
+     */
+    function installDialogStubs(saveDialogResponse: vscode.Uri | undefined) {
+        const origShowSaveDialog = vscode.window.showSaveDialog;
+        const origShowInfo = vscode.window.showInformationMessage;
+        const origShowError = vscode.window.showErrorMessage;
+        let saveDialogCalls = 0;
+        let lastDefaultUri: vscode.Uri | undefined;
+        const infoMessages: string[] = [];
+        const errorMessages: string[] = [];
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (vscode.window as any).showSaveDialog = async (opts?: vscode.SaveDialogOptions) => {
+            saveDialogCalls++;
+            lastDefaultUri = opts?.defaultUri;
+            return saveDialogResponse;
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (vscode.window as any).showInformationMessage = async (msg: string) => {
+            infoMessages.push(msg);
+            return undefined;
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (vscode.window as any).showErrorMessage = async (msg: string) => {
+            errorMessages.push(msg);
+            return undefined;
+        };
+        return {
+            get saveDialogCalls() { return saveDialogCalls; },
+            get lastDefaultUri() { return lastDefaultUri; },
+            get infoMessages() { return infoMessages; },
+            get errorMessages() { return errorMessages; },
+            restore() {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (vscode.window as any).showSaveDialog = origShowSaveDialog;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (vscode.window as any).showInformationMessage = origShowInfo;
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                (vscode.window as any).showErrorMessage = origShowError;
+            },
+        };
+    }
+
+    // ---------- Test 6.6b — unsolicited saveResult writes user-chosen path -
+
+    test('6.6b — unsolicited saveResult writes user-chosen path (SHA-256 match)', async function () {
+        this.timeout(10_000);
+        const h = await makeHarness(FIXTURE_1x1_PNG, 'open.png');
+        const tmpDestDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'paintbox-66b-'));
+        const destPath = path.join(tmpDestDir, 'export.png');
+        const destUri = vscode.Uri.file(destPath);
+        const stubs = installDialogStubs(destUri);
+        try {
+            // The bytes the "webview" emitted (use the 2x2 fixture so the
+            // file is non-trivial and SHA-256 is auditable).
+            const webviewBytes = await fs.promises.readFile(FIXTURE_2x2_PNG);
+            const webviewSha = sha256(webviewBytes);
+
+            await Promise.resolve(h.messageHandler({
+                type: 'saveResult',
+                // No requestId — unsolicited path.
+                bytes: Array.from(webviewBytes),
+                format: 'PNG',
+                filename: 'export.png',
+                mime: 'image/png',
+            }));
+
+            // Allow the host's awaited writeFile to settle.
+            await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+            // showSaveDialog was called exactly once.
+            assert.strictEqual(stubs.saveDialogCalls, 1,
+                `expected 1 showSaveDialog call; saw ${stubs.saveDialogCalls}`);
+            // defaultUri uses the open document's parent dir + msg.filename.
+            assert.ok(stubs.lastDefaultUri, 'showSaveDialog should be passed defaultUri');
+            assert.strictEqual(
+                path.basename(stubs.lastDefaultUri!.fsPath),
+                'export.png',
+                `defaultUri filename should be export.png; got: ${stubs.lastDefaultUri!.fsPath}`
+            );
+
+            // File written, SHA-256 match.
+            const onDisk = await fs.promises.readFile(destPath);
+            assert.strictEqual(
+                sha256(onDisk),
+                webviewSha,
+                'on-disk bytes must hash-match the webview-emitted bytes'
+            );
+
+            // Info toast asserted.
+            const savedToast = stubs.infoMessages.find((m) => /Paintbox: saved/.test(m));
+            assert.ok(savedToast,
+                `expected a 'Paintbox: saved …' info toast; saw: ${JSON.stringify(stubs.infoMessages)}`);
+            assert.match(savedToast!, /export\.png/,
+                `toast should mention the saved basename; got: ${savedToast}`);
+            // No error toast.
+            assert.strictEqual(stubs.errorMessages.length, 0,
+                `unexpected error toast(s): ${JSON.stringify(stubs.errorMessages)}`);
+        } finally {
+            stubs.restore();
+            await fs.promises.rm(tmpDestDir, { recursive: true, force: true }).catch(() => undefined);
+            await h.cleanup();
+        }
+    });
+
+    // ---------- Test 6.6c — cancelled showSaveDialog → no write -----------
+
+    test('6.6c — cancelled showSaveDialog → no file written, no error toast', async function () {
+        this.timeout(10_000);
+        const h = await makeHarness(FIXTURE_1x1_PNG, 'open.png');
+        const tmpDestDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'paintbox-66c-'));
+        const destPath = path.join(tmpDestDir, 'cancelled.png');
+        const stubs = installDialogStubs(undefined); // user cancels
+        try {
+            const webviewBytes = await fs.promises.readFile(FIXTURE_2x2_PNG);
+
+            await Promise.resolve(h.messageHandler({
+                type: 'saveResult',
+                bytes: Array.from(webviewBytes),
+                format: 'PNG',
+                filename: 'cancelled.png',
+                mime: 'image/png',
+            }));
+
+            // Allow async path to settle.
+            await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+            assert.strictEqual(stubs.saveDialogCalls, 1,
+                `expected 1 showSaveDialog call; saw ${stubs.saveDialogCalls}`);
+
+            // Destination file must NOT exist.
+            let destExists = true;
+            try { await fs.promises.stat(destPath); } catch { destExists = false; }
+            assert.strictEqual(destExists, false,
+                'no file should be written when user cancels showSaveDialog');
+
+            // No info toast (silent no-op).
+            assert.strictEqual(stubs.infoMessages.length, 0,
+                `unexpected info toast on cancellation: ${JSON.stringify(stubs.infoMessages)}`);
+            // No error toast.
+            assert.strictEqual(stubs.errorMessages.length, 0,
+                `unexpected error toast on cancellation: ${JSON.stringify(stubs.errorMessages)}`);
+        } finally {
+            stubs.restore();
+            await fs.promises.rm(tmpDestDir, { recursive: true, force: true }).catch(() => undefined);
+            await h.cleanup();
+        }
+    });
+
+    // ---------- Test 6.6d — __print__ sentinel routes to tmpdir + openExternal
+
+    test('6.6d — __print__ requestId writes tmp PNG and calls openExternal', async function () {
+        this.timeout(10_000);
+        const h = await makeHarness(FIXTURE_1x1_PNG, 'open.png');
+
+        // Stub openExternal to capture the call (don't actually launch a viewer).
+        const origOpenExternal = vscode.env.openExternal;
+        const openExternalCalls: vscode.Uri[] = [];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (vscode.env as any).openExternal = async (uri: vscode.Uri) => {
+            openExternalCalls.push(uri);
+            return true;
+        };
+
+        const origShowInfo = vscode.window.showInformationMessage;
+        const infoMessages: string[] = [];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (vscode.window as any).showInformationMessage = async (msg: string) => {
+            infoMessages.push(msg);
+            return undefined;
+        };
+        const origShowError = vscode.window.showErrorMessage;
+        const errorMessages: string[] = [];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (vscode.window as any).showErrorMessage = async (msg: string) => {
+            errorMessages.push(msg);
+            return undefined;
+        };
+
+        try {
+            const webviewBytes = await fs.promises.readFile(FIXTURE_2x2_PNG);
+
+            await Promise.resolve(h.messageHandler({
+                type: 'saveResult',
+                requestId: '__print__',
+                bytes: Array.from(webviewBytes),
+                format: 'PNG',
+                filename: 'print.png',
+                mime: 'image/png',
+            }));
+
+            // Allow the awaited writeFile + openExternal to settle.
+            await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+            // openExternal called exactly once.
+            assert.strictEqual(openExternalCalls.length, 1,
+                `expected 1 openExternal call; saw ${openExternalCalls.length}`);
+            const tmpUri = openExternalCalls[0];
+            assert.ok(tmpUri.fsPath.startsWith(os.tmpdir()),
+                `openExternal Uri should point inside os.tmpdir(); got: ${tmpUri.fsPath}`);
+            assert.match(path.basename(tmpUri.fsPath), /^paintbox-print-.*\.png$/,
+                `tmp filename should match paintbox-print-*.png; got: ${path.basename(tmpUri.fsPath)}`);
+
+            // The tmp PNG was actually written; bytes match the webview emit.
+            const onDisk = await fs.promises.readFile(tmpUri.fsPath);
+            assert.strictEqual(
+                sha256(onDisk),
+                sha256(webviewBytes),
+                'tmp PNG bytes must hash-match the webview-emitted bytes'
+            );
+
+            // Info toast asserted.
+            const printToast = infoMessages.find((m) => /default image viewer for printing/.test(m));
+            assert.ok(printToast,
+                `expected the 'opened in your default image viewer for printing' toast; saw: ${JSON.stringify(infoMessages)}`);
+            assert.strictEqual(errorMessages.length, 0,
+                `unexpected error toast: ${JSON.stringify(errorMessages)}`);
+
+            // Cleanup the tmp artifact (best-effort).
+            await fs.promises.unlink(tmpUri.fsPath).catch(() => undefined);
+        } finally {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (vscode.env as any).openExternal = origOpenExternal;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (vscode.window as any).showInformationMessage = origShowInfo;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (vscode.window as any).showErrorMessage = origShowError;
             await h.cleanup();
         }
     });

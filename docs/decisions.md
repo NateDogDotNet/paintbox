@@ -370,4 +370,112 @@ allow-list-style for `out/` + `vendor/`).
 
 ---
 
+**2026-04-28 — Phase 6.6 restore four broken miniPaint features: Search Images, Export, in-app Save As, Print**
+
+Burn-in of v0.0.3 confirmed Phase 6.5's init fix works end-to-end (real PNG
+round-trip lands on disk), but four upstream miniPaint features remained
+broken under the webview sandbox: Search Images (Pixabay API blocked by
+CSP), File → Export (bytes posted with no requestId got logged-and-dropped
+by the host), File → Save As inside the webview (same code path as Export),
+and File → Print (literally `window.print()`, which VS Code webviews
+silently block).
+
+Sub-decisions:
+
+1. **Search Images — CSP relax, no bundle patch (D1).** Added
+   `https://pixabay.com https://*.pixabay.com` to BOTH `connect-src` (for
+   the `$.getJSON` call to `pixabay.com/api/`) and `img-src` (for thumbnails
+   and the eventual chosen image, which load from `*.pixabay.com` CDN
+   subdomains and the root domain `/get/` paths). `script-src` deliberately
+   unchanged — Pixabay never serves code into the webview, so no relaxation
+   there. `default-src 'none'` stays in place; the additions are explicit
+   per directive. The Pixabay API key embedded at `vendor/minipaint/src/js/config.js:16`
+   is already public upstream — no new credential exposure.
+
+   Rejected alternative: route Pixabay through the host (extension fetches,
+   returns to webview). Adds complexity, no real security benefit, and
+   would require re-implementing pagination + error handling. Simple CSP
+   relaxation is the right scope.
+
+2. **Export + in-app Save As — handle unsolicited saveResult (D2).** Phase
+   5 originally chose to log-and-ignore saveResults with no matching
+   requestId — overwriting a workspace file in response to a button click
+   the user thought meant "download" was a trust violation. Phase 6.6
+   replaces "log and drop" with `vscode.window.showSaveDialog`: the user
+   explicitly picks a destination path before any byte hits disk. The
+   dialog's `defaultUri` is the open document's parent directory + the
+   filename miniPaint suggested (`vscode.Uri.joinPath(documentUri, '..',
+   filename)`); user can override the extension via the dialog's "All
+   files" filter (appended last). Cancel → silent no-op (no toast); success
+   → `Paintbox: saved <basename>` info toast; writeFile error → error
+   toast. No new map needed — the message handler closure already captures
+   `document.uri`, which is the right parent for unsolicited saves on this
+   panel (multi-editor case is naturally handled).
+
+   Filter mapping is a const lookup keyed by either the `format` string
+   miniPaint emits ('PNG', 'JPG', etc.) OR the `mime` string ('image/png',
+   etc.), so the host accepts whichever the bridge attaches. JSON
+   ('miniPaint layered') and TIFF/AVIF are accepted on this path even
+   though they're not in `package.json`'s `customEditors` selector — the
+   user opted into the export, so we honor it.
+
+3. **Print — sentinel requestId rerouting through the existing bridge
+   (D4).** miniPaint's `print.js` is literally `window.print()`. VS Code
+   webviews silently block this. Two-part fix:
+
+   - **Shim:** monkey-patch `window.print` inside the IIFE, AFTER
+     `window.__pbBridge` is installed and BEFORE the bundle runs. The
+     patched function stashes `__pbPendingRequestId='__print__'` then
+     calls `window.FileSave.save_action({name:'print.png', type:'PNG',
+     quality:90, layers:'All', delay:400, calc_size:false}, /*autoname*/
+     true)`. The bridge attaches the sentinel to the resulting saveResult
+     via the existing path; no new message types.
+
+   - **Host:** `case 'saveResult':` checks for `requestId === '__print__'`
+     after the correlator-match path and before the unsolicited path. Hit
+     writes bytes to `path.join(os.tmpdir(), 'paintbox-print-' +
+     crypto.randomUUID() + '.png')`, then calls
+     `vscode.env.openExternal(vscode.Uri.file(tmpPath))`. Toast on
+     success: `Paintbox: opened in your default image viewer for
+     printing`. On openExternal rejection (no GUI session, no handler —
+     plausible in code-server): fallback toast `Paintbox: print artifact
+     saved at ${tmpPath}` so the user can fetch the file manually.
+
+   Rejected alternative: render canvas inline and call
+   `iframe.contentWindow.print()`. Tested in earlier ad-hoc; webviews
+   still block. A custom in-webview print preview is large scope.
+
+4. **Test additions (28 → 33 passing).** Five tests:
+   - **6.6a (extension.test.ts unit):** assert `buildWebviewHtml` CSP
+     contains pixabay in `img-src` and `connect-src` AND NOT in
+     `script-src`; regression guard against tightening.
+   - **6.6b (save.test.ts integration):** stub `showSaveDialog` to return
+     a tmp Uri; synthesize saveResult with no requestId; assert file
+     written, SHA-256 matches webview bytes, info toast asserted.
+   - **6.6c (save.test.ts integration):** stub `showSaveDialog` to return
+     `undefined`; synthesize saveResult; assert no file written, no toast
+     of any kind.
+   - **6.6d (save.test.ts integration):** stub `vscode.env.openExternal`;
+     synthesize saveResult with `requestId:'__print__'`; assert tmp PNG
+     written under `os.tmpdir()` matching `paintbox-print-*.png`,
+     openExternal called with that Uri, info toast asserted.
+   - **6.6e (extension.test.ts vm-sandbox unit):** load compiled shim;
+     stub `window.FileSave.save_action`; call patched `window.print()`;
+     assert `__pbPendingRequestId === '__print__'` and save_action was
+     called with the expected payload + `autoname=true`.
+
+   Test 4b was minimally updated to stub `vscode.window.showSaveDialog`
+   to return `undefined`, since its synthetic saveResult-with-no-requestId
+   now routes to the unsolicited handler instead of the dropped
+   log-and-ignore path. The test's intent ("messageHandler doesn't throw
+   on saveResult/saveError") is preserved. No structural regex check
+   changes were required.
+
+Bundle `vendor/minipaint/dist/bundle.js` SHA-256 unchanged
+(`d084e26…83356`); `patchMinipaintBundle.ts` patch surface stays at 8
+sites. Phase 6.6 is host + shim + tests + CSP only — zero bundle bytes
+changed. Bumped to v0.0.4.
+
+---
+
 *(Add new entries at the bottom, newest last.)*

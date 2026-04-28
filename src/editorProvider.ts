@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as os from 'os';
 import * as crypto from 'crypto';
 import { buildWebviewHtml } from './webviewHtml';
 import { SaveCorrelator } from './saveCorrelator';
@@ -68,6 +69,32 @@ const FORMAT_BY_EXT: Record<string, { format: 'PNG'|'JPG'|'WEBP'|'BMP'|'GIF'; mi
 };
 
 const SAVE_TIMEOUT_MS = 30_000;
+
+/**
+ * Phase 6.6 §D2: filter map for `vscode.window.showSaveDialog` when the
+ * webview emits an unsolicited saveResult (Export / in-app Save As). Keys
+ * are miniPaint format strings AND MIME strings — the webview message may
+ * carry either, so we accept both. `'All files'` is appended last by the
+ * caller so the user can override the suggested extension.
+ */
+const SAVE_DIALOG_FILTERS: Record<string, { [k: string]: string[] }> = {
+    'PNG':         { 'PNG image':         ['png'] },
+    'image/png':   { 'PNG image':         ['png'] },
+    'JPG':         { 'JPEG image':        ['jpg', 'jpeg'] },
+    'image/jpeg':  { 'JPEG image':        ['jpg', 'jpeg'] },
+    'WEBP':        { 'WebP image':        ['webp'] },
+    'image/webp':  { 'WebP image':        ['webp'] },
+    'GIF':         { 'GIF image':         ['gif'] },
+    'image/gif':   { 'GIF image':         ['gif'] },
+    'BMP':         { 'BMP image':         ['bmp'] },
+    'image/bmp':   { 'BMP image':         ['bmp'] },
+    'JSON':        { 'miniPaint layered': ['json'] },
+    'application/json': { 'miniPaint layered': ['json'] },
+    'TIFF':        { 'TIFF image':        ['tiff'] },
+    'image/tiff':  { 'TIFF image':        ['tiff'] },
+    'AVIF':        { 'AVIF image':        ['avif'] },
+    'image/avif':  { 'AVIF image':        ['avif'] },
+};
 
 function deriveMime(uri: vscode.Uri): string {
     const ext = path.extname(uri.fsPath).toLowerCase();
@@ -279,46 +306,49 @@ export class PaintboxEditorProvider
                 }
                 case 'saveResult': {
                     const requestId = typeof msg.requestId === 'string' ? msg.requestId : '';
-                    if (!requestId) {
-                        // Default 4: user-initiated save (File menu inside
-                        // webview). Log and ignore — DO NOT write to disk.
-                        // Silently writing in response to a UI button click
-                        // is a trust violation; the user thinks "download"
-                        // not "overwrite the workspace file."
-                        // eslint-disable-next-line no-console
-                        console.log('[paintbox] saveResult without pending request — ignored', {
-                            requestId,
-                            format: String(msg.format || ''),
-                            filename: String(msg.filename || ''),
-                        });
+                    // Path 1 — host-initiated save: a pending correlator entry
+                    // exists for this requestId. Run Gate 2 (MIME match) and
+                    // hand bytes to the correlator.
+                    const meta = requestId
+                        ? this._correlator.__pbTestGetMeta(requestId)
+                        : undefined;
+                    if (meta) {
+                        const arrivedMime = String(msg.mime || '');
+                        if (arrivedMime !== meta.expectedMime) {
+                            this._correlator.cancel(requestId, new Error(
+                                `Paintbox: expected ${meta.expectedMime} but webview produced ${arrivedMime || '(unknown)'}. ` +
+                                'Save aborted to avoid writing the wrong format to disk.'
+                            ));
+                            return;
+                        }
+                        const bytesArr = Array.isArray(msg.bytes) ? (msg.bytes as number[]) : null;
+                        if (!bytesArr || bytesArr.length === 0) {
+                            this._correlator.cancel(requestId, new Error(
+                                'Paintbox: webview returned empty bytes; save aborted.'
+                            ));
+                            return;
+                        }
+                        this._correlator.handleSaveResult(requestId, new Uint8Array(bytesArr));
                         return;
                     }
-                    // Format/MIME enforcement (Gate 2, design §8).
-                    const arrivedMime = String(msg.mime || '');
-                    // Read the meta BEFORE delivering — once handleSaveResult
-                    // fires, the entry is gone.
-                    const meta = this._correlator.__pbTestGetMeta(requestId);
-                    if (!meta) {
-                        // Late arrival after timeout/cancel; log and drop.
-                        // eslint-disable-next-line no-console
-                        console.log('[paintbox] saveResult for unknown requestId — ignored', { requestId });
+                    // Path 2 — Print sentinel (Phase 6.6 §D4): the shim's
+                    // monkey-patched `window.print` stashes
+                    // `__pbPendingRequestId='__print__'` then calls
+                    // `save_action`; the bridge attaches the sentinel to the
+                    // resulting saveResult. Write to a tmp PNG and ask VS Code
+                    // to open it externally so the user's default image viewer
+                    // (with its own Print menu) takes over.
+                    if (requestId === '__print__') {
+                        await this._handlePrintSaveResult(msg);
                         return;
                     }
-                    if (arrivedMime !== meta.expectedMime) {
-                        this._correlator.cancel(requestId, new Error(
-                            `Paintbox: expected ${meta.expectedMime} but webview produced ${arrivedMime || '(unknown)'}. ` +
-                            'Save aborted to avoid writing the wrong format to disk.'
-                        ));
-                        return;
-                    }
-                    const bytesArr = Array.isArray(msg.bytes) ? (msg.bytes as number[]) : null;
-                    if (!bytesArr || bytesArr.length === 0) {
-                        this._correlator.cancel(requestId, new Error(
-                            'Paintbox: webview returned empty bytes; save aborted.'
-                        ));
-                        return;
-                    }
-                    this._correlator.handleSaveResult(requestId, new Uint8Array(bytesArr));
+                    // Path 3 — unsolicited save (Phase 6.6 §D2): user clicked
+                    // File → Export or File → Save As inside the webview. No
+                    // pending host request, no print sentinel. Prompt the user
+                    // for a destination via showSaveDialog and write the bytes
+                    // there. NEVER write silently — the user thinks "download",
+                    // not "overwrite the workspace file."
+                    await this._handleUnsolicitedSaveResult(msg, document.uri);
                     return;
                 }
                 case 'saveError': {
@@ -600,6 +630,96 @@ export class PaintboxEditorProvider
             // next edit re-fires `dirty`.
             panel.webview.postMessage({ type: 'saved', requestId })
                 .then(undefined, () => { /* best-effort */ });
+        }
+    }
+
+    /**
+     * Phase 6.6 §D2: handle a webview-initiated saveResult that has no matching
+     * host request (Export / in-app Save As). Prompt the user via
+     * `showSaveDialog`, then write the bytes to the chosen destination.
+     *
+     *   • `defaultUri` = sibling of the open document, with miniPaint's
+     *     suggested filename. This puts the export next to the source file in
+     *     the workspace, which is what users expect.
+     *   • Cancelled dialog (returns undefined) → silent no-op. The user
+     *     opted out; no toast.
+     *   • writeFile failure → error toast. VS Code's own modal save flow
+     *     surfaces these via "Save failed:"; for unsolicited saves there's no
+     *     such envelope, so the toast is the only signal.
+     */
+    private async _handleUnsolicitedSaveResult(
+        msg: { [k: string]: unknown },
+        documentUri: vscode.Uri
+    ): Promise<void> {
+        const filename = String(msg.filename || 'image.png');
+        const formatKey = String(msg.format || msg.mime || '');
+        const filterEntry = SAVE_DIALOG_FILTERS[formatKey];
+        const filters: { [k: string]: string[] } = {
+            ...(filterEntry || {}),
+            // 'All files' last per Phase 6.6 brief — lets the user override
+            // the suggested extension.
+            'All files': ['*'],
+        };
+
+        const parentDir = vscode.Uri.joinPath(documentUri, '..');
+        const defaultUri = vscode.Uri.joinPath(parentDir, filename);
+
+        const target = await vscode.window.showSaveDialog({ defaultUri, filters });
+        if (!target) {
+            // User cancelled; no toast (Phase 6.6 §D2: silent no-op).
+            return;
+        }
+
+        const bytesArr = Array.isArray(msg.bytes) ? (msg.bytes as number[]) : [];
+        try {
+            await vscode.workspace.fs.writeFile(target, new Uint8Array(bytesArr));
+            vscode.window.showInformationMessage(
+                `Paintbox: saved ${path.basename(target.fsPath)}`
+            );
+        } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(`Paintbox: save failed: ${errMsg}`);
+        }
+    }
+
+    /**
+     * Phase 6.6 §D4: handle a saveResult tagged with the `__print__` sentinel.
+     * The shim's monkey-patched `window.print` reroutes through `save_action`
+     * and the existing bridge; this side writes the bytes to a tmp PNG and
+     * asks VS Code to open it externally so the user's default image viewer
+     * (which has its own Print menu) takes over.
+     *
+     * `vscode.env.openExternal` may fail in code-server when the host has no
+     * graphical session and no registered handler; the fallback toast surfaces
+     * the tmp path so the user can fetch the artifact manually.
+     */
+    private async _handlePrintSaveResult(
+        msg: { [k: string]: unknown }
+    ): Promise<void> {
+        const bytesArr = Array.isArray(msg.bytes) ? (msg.bytes as number[]) : [];
+        const tmpPath = path.join(
+            os.tmpdir(),
+            'paintbox-print-' + crypto.randomUUID() + '.png'
+        );
+        const tmpUri = vscode.Uri.file(tmpPath);
+        try {
+            await vscode.workspace.fs.writeFile(tmpUri, new Uint8Array(bytesArr));
+        } catch (err: unknown) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(`Paintbox: print failed: ${errMsg}`);
+            return;
+        }
+        try {
+            await vscode.env.openExternal(tmpUri);
+            vscode.window.showInformationMessage(
+                'Paintbox: opened in your default image viewer for printing'
+            );
+        } catch {
+            // openExternal rejected (no GUI session, no handler, etc.).
+            // Surface the tmp path so the user can find the artifact.
+            vscode.window.showInformationMessage(
+                `Paintbox: print artifact saved at ${tmpPath}`
+            );
         }
     }
 

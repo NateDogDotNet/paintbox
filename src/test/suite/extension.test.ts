@@ -151,6 +151,63 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
         );
     });
 
+    // ---------- Test 6.6a: CSP shape (Phase 6.6 §D1) ----------------------
+
+    test('6.6a — buildWebviewHtml CSP allows Pixabay in img-src and connect-src', () => {
+        // Phase 6.6 §D1: Search Images calls https://pixabay.com/api/?key=…
+        // and loads thumbnails from *.pixabay.com. Both must be allowlisted in
+        // `connect-src` AND `img-src` for the call/render to succeed under
+        // VS Code's webview CSP. Critically, NO new script-src — Pixabay
+        // never serves code into the webview.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { buildWebviewHtml } = require('../../webviewHtml');
+        const extensionPath = path.resolve(__dirname, '../../..');
+        const extensionUri = vscode.Uri.file(extensionPath);
+        const fakeWebview: Pick<vscode.Webview, 'cspSource' | 'asWebviewUri'> = {
+            cspSource: 'vscode-webview://fake-cspsource',
+            asWebviewUri: (uri: vscode.Uri) =>
+                vscode.Uri.parse(`https://fake-webview.test${uri.path}`),
+        };
+        const html: string = buildWebviewHtml(
+            fakeWebview,
+            extensionUri,
+            { filename: 't.png' }
+        );
+        const cspMatch = html.match(/<meta http-equiv="Content-Security-Policy"[^>]+>/);
+        assert.ok(cspMatch, 'expected a Content-Security-Policy <meta> tag');
+        const cspMeta = cspMatch![0];
+
+        // Extract individual directives so we can assert per-directive
+        // membership (vs. a single-line regex that could pass on a typo).
+        const directiveMatch = (name: string): string => {
+            const re = new RegExp(`${name}([^;"]*)`);
+            const m = cspMeta.match(re);
+            return m ? m[1] : '';
+        };
+        const imgSrc = directiveMatch('img-src');
+        const connectSrc = directiveMatch('connect-src');
+        const scriptSrc = directiveMatch('script-src');
+
+        assert.ok(imgSrc.includes('https://pixabay.com'),
+            `img-src must include https://pixabay.com; got: ${imgSrc}`);
+        assert.ok(imgSrc.includes('https://*.pixabay.com'),
+            `img-src must include https://*.pixabay.com; got: ${imgSrc}`);
+        assert.ok(connectSrc.includes('https://pixabay.com'),
+            `connect-src must include https://pixabay.com; got: ${connectSrc}`);
+        assert.ok(connectSrc.includes('https://*.pixabay.com'),
+            `connect-src must include https://*.pixabay.com; got: ${connectSrc}`);
+
+        // Regression guard: script-src must NOT include pixabay (no code
+        // loading from external origins).
+        assert.ok(!scriptSrc.includes('pixabay'),
+            `script-src must NOT include pixabay; got: ${scriptSrc}`);
+
+        // Default-src 'none' still in place — additions are explicit per
+        // directive, not via a fallback relax.
+        assert.match(cspMeta, /default-src 'none'/,
+            "default-src 'none' must remain in place");
+    });
+
     // ---------- Test 3b: host posts load after webviewReady ----------------
 
     test('3b — host posts load message after webviewReady', async () => {
@@ -476,5 +533,119 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
         const ready = posted.find((m) => m.type === 'webviewReady');
         assert.strictEqual(ready, undefined,
             'webviewReady must NOT be posted when window globals are missing');
+    });
+
+    // ---------- Test 6.6e: shim window.print monkey-patch (Phase 6.6 §D4) -
+
+    test('6.6e — shim monkey-patches window.print to call FileSave.save_action with __print__ sentinel', () => {
+        // Phase 6.6 §D4: shim's IIFE installs a `window.print` override that
+        // (1) stashes `__pbPendingRequestId='__print__'` and
+        // (2) calls `window.FileSave.save_action({…}, true)`.
+        // The bridge then attaches the sentinel to the saveResult, and the
+        // host's saveResult handler routes `__print__` to tmpdir + openExternal.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const vm = require('vm');
+        const shimPath = path.resolve(__dirname, '../../webview/shim.js');
+        const shimSource = fs.readFileSync(shimPath, 'utf8');
+
+        // Stub FileSave so we can capture save_action calls.
+        const saveActionCalls: Array<{ user_response: unknown; autoname: boolean }> = [];
+        const fakeFileSave = {
+            save_action: (user_response: unknown, autoname: boolean) => {
+                saveActionCalls.push({ user_response, autoname });
+            },
+        };
+
+        const fakeVscode = {
+            postMessage: () => undefined,
+            getState: () => undefined,
+            setState: () => undefined,
+        };
+
+        const eventListeners: Record<string, Array<(e: unknown) => void>> = {};
+        const fakeDocument = {
+            readyState: 'loading',
+            body: { dataset: {} as Record<string, string> },
+            getElementById: (_id: string) => null,
+            addEventListener: (
+                ev: string,
+                cb: (e: unknown) => void,
+                _opts?: unknown
+            ) => {
+                (eventListeners[ev] = eventListeners[ev] || []).push(cb);
+            },
+        };
+        // FileSave is set on window BEFORE the shim's IIFE runs — production
+        // ordering has the bundle run first, but in this unit test we don't
+        // run the bundle, so we put FileSave in place directly.
+        const fakeWindow: { [k: string]: unknown } = {
+            addEventListener: (
+                ev: string,
+                cb: (e: unknown) => void,
+                _opts?: unknown
+            ) => {
+                (eventListeners[ev] = eventListeners[ev] || []).push(cb);
+            },
+            __pbTestVsCode: fakeVscode,
+            FileSave: fakeFileSave,
+        };
+
+        const sandbox: { [k: string]: unknown } = {
+            window: fakeWindow,
+            document: fakeDocument,
+            Promise,
+            setTimeout,
+            requestAnimationFrame: (cb: () => void) => { cb(); },
+            console: { log: () => undefined, error: () => undefined, warn: () => undefined },
+            Array,
+            Object,
+            Error,
+            JSON,
+            String,
+            acquireVsCodeApi: () => {
+                throw new Error('acquireVsCodeApi() should not be called when __pbTestVsCode is set');
+            },
+        };
+        sandbox.globalThis = sandbox;
+        vm.createContext(sandbox);
+        vm.runInContext(shimSource, sandbox, { filename: 'shim.js' });
+
+        // The IIFE has run; window.print should now be the patched version.
+        const patchedPrint = (fakeWindow as { print?: () => void }).print;
+        assert.strictEqual(typeof patchedPrint, 'function',
+            'shim should install window.print as a function');
+
+        // Pre-condition: __pbPendingRequestId not set yet.
+        assert.strictEqual(
+            (fakeWindow as { __pbPendingRequestId?: string }).__pbPendingRequestId,
+            undefined,
+            '__pbPendingRequestId should be unset before window.print()'
+        );
+
+        patchedPrint!();
+
+        // Sentinel stashed.
+        assert.strictEqual(
+            (fakeWindow as { __pbPendingRequestId?: string }).__pbPendingRequestId,
+            '__print__',
+            'window.print must stash __pbPendingRequestId="__print__"'
+        );
+
+        // save_action called exactly once with the expected payload.
+        assert.strictEqual(saveActionCalls.length, 1,
+            `expected exactly 1 save_action call; saw ${saveActionCalls.length}`);
+        const call = saveActionCalls[0];
+        assert.strictEqual(call.autoname, true,
+            'save_action autoname argument should be true');
+        const ur = call.user_response as {
+            name: string; type: string; quality: number;
+            layers: string; delay: number; calc_size: boolean;
+        };
+        assert.strictEqual(ur.name, 'print.png', 'user_response.name should be print.png');
+        assert.strictEqual(ur.type, 'PNG', 'user_response.type should be PNG');
+        assert.strictEqual(ur.quality, 90, 'user_response.quality should be 90');
+        assert.strictEqual(ur.layers, 'All', 'user_response.layers should be All');
+        assert.strictEqual(ur.delay, 400, 'user_response.delay should be 400');
+        assert.strictEqual(ur.calc_size, false, 'user_response.calc_size should be false');
     });
 });
