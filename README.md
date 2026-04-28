@@ -71,6 +71,16 @@ npm run publish:ovsx
 Open VSX is the target registry (not Microsoft Marketplace) so the extension works in
 any code-server installation.
 
+## Known limitations
+
+These are environment-imposed quirks of running miniPaint inside a VS Code webview, not bugs in paintbox itself:
+
+- **Export GIF** does nothing. miniPaint encodes GIFs via a Web Worker (`gif.worker.js`) that the webview's strict CSP currently blocks. Workaround: export as PNG and convert with an external tool. (Tracked for a future fix.)
+- **Export BMP** errors with "Browser does not support…". Most browsers don't ship a native BMP encoder, and miniPaint defers to the browser's `canvas.toBlob('image/bmp')`. No good workaround in-browser. Use PNG instead — it's lossless and universally supported.
+- **Print** writes a temporary PNG and shows a toast with the path plus a "Reveal in Explorer" button. There's no system print dialog inside a webview running on a remote server. Open the file from your local machine (or from the VS Code file tree) and print from there.
+
+For everything else, file an issue: https://github.com/NateDogDotNet/paintbox/issues
+
 ## miniPaint credit
 
 This extension is powered by **miniPaint** by Vilius Sutkus '89.  

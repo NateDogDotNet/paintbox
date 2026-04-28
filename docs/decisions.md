@@ -478,4 +478,65 @@ changed. Bumped to v0.0.4.
 
 ---
 
+**2026-04-28 — Phase 6.7 simplify Print toast; document GIF + BMP as upstream limits**
+
+Burn-in of v0.0.4 surfaced three remaining defects in the Phase 6.6 feature
+restoration:
+
+1. **Export GIF** silently does nothing — miniPaint's `gif.worker.js` is
+   CSP-hostile under the webview sandbox (existing carry-over to Phase 7+).
+2. **Export BMP** errors with "Browser does not support…" — Chrome and most
+   browsers don't natively support `canvas.toBlob('image/bmp')`. miniPaint
+   defers to the browser, so there's no in-browser workaround.
+3. **Print** showed a success toast ("opened in your default image viewer for
+   printing") but no viewer ever opened. Root cause: `vscode.env.openExternal`
+   resolves `true` to mean "I tried to dispatch the URI"; in code-server
+   (server-side extension host with no graphical session), that dispatch goes
+   nowhere. The toast was lying to the user.
+
+**Option A (KISS) chosen over deeper Print fix.** Considered routing print
+through a VS Code command that opens the tmp PNG in a real preview pane, or
+spawning a host-side print spooler — both are scope creep for a v1 image
+editor. The simpler fix: the saved-path toast was already the fallback when
+`openExternal` rejected; we promote it to the only branch and add a "Reveal
+in Explorer" action button so the user can jump to the artifact in the file
+tree. `revealFileInOS` is the right command — it works in code-server (opens
+the VS Code file-explorer pane to the file) and also in local VS Code (opens
+the OS file manager). No more lying success toast; the toast text alone is
+self-sufficient if `revealFileInOS` doesn't behave as expected on a given
+host.
+
+`_handlePrintSaveResult` collapsed from two branches (success/fallback) to
+one: writeFile to tmp → `showInformationMessage(<path>, 'Reveal in
+Explorer')` → if user clicks, `executeCommand('revealFileInOS', tmpUri)`.
+`vscode.env.openExternal` is gone from the print path entirely.
+
+**GIF + BMP documented as upstream limits, not paintbox bugs.** A new
+"Known limitations" section in `README.md` enumerates all three (GIF, BMP,
+Print) with workarounds. Framed as environment-imposed quirks of running
+miniPaint inside a webview, with an explicit pointer to the issue tracker
+for everything else. No code changes for GIF/BMP — these stay as-is until
+Phase 7+ revisits CSP policy or upstream miniPaint adds a native BMP
+encoder.
+
+**Test 6.6d rewritten in place** (test count stays at 33). The old
+assertion shape was "openExternal called once + toast text matches /default
+image viewer for printing/"; the new shape is "showInformationMessage called
+with text matching /print artifact saved at/ AND with 'Reveal in Explorer'
+as a button-label arg AND simulating the user clicking that button invokes
+`vscode.commands.executeCommand('revealFileInOS', tmpUri)`". Test name
+updated to "6.6d — __print__ requestId writes tmp PNG and surfaces
+actionable toast" to match the new behavior. The simulated-button-click +
+`executeCommand` assertion is the nice-to-have suggested in the brief —
+included because it adds coverage of the action handler at no test-harness
+complexity cost (just a third stub on `vscode.commands.executeCommand`).
+
+Bundle `vendor/minipaint/dist/bundle.js` SHA-256 unchanged
+(`d084e26…83356`); `patchMinipaintBundle.ts` patch surface stays at 8
+sites; `src/webview/shim.ts` unchanged; `src/webviewHtml.ts` CSP unchanged.
+Phase 6.7 is host + tests + docs only — zero bundle bytes, zero shim bytes,
+zero CSP bytes changed. Bumped to v0.0.5.
+
+---
+
 *(Add new entries at the bottom, newest last.)*

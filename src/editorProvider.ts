@@ -683,15 +683,19 @@ export class PaintboxEditorProvider
     }
 
     /**
-     * Phase 6.6 §D4: handle a saveResult tagged with the `__print__` sentinel.
+     * Phase 6.7 §1: handle a saveResult tagged with the `__print__` sentinel.
      * The shim's monkey-patched `window.print` reroutes through `save_action`
      * and the existing bridge; this side writes the bytes to a tmp PNG and
-     * asks VS Code to open it externally so the user's default image viewer
-     * (which has its own Print menu) takes over.
+     * surfaces an actionable toast pointing the user at the artifact.
      *
-     * `vscode.env.openExternal` may fail in code-server when the host has no
-     * graphical session and no registered handler; the fallback toast surfaces
-     * the tmp path so the user can fetch the artifact manually.
+     * Phase 6.6 originally called `vscode.env.openExternal` here, but that
+     * silently no-ops in code-server (the server-side extension host has no
+     * graphical session, so the URI-dispatch goes nowhere yet `openExternal`
+     * still resolves `true`). The success toast was a lie. Phase 6.7 collapses
+     * to a single branch: always show the saved path + a "Reveal in Explorer"
+     * action that runs the built-in `revealFileInOS` command (which works
+     * correctly in code-server). Local VS Code users still get the path in the
+     * toast text if `revealFileInOS` doesn't behave as expected on their host.
      */
     private async _handlePrintSaveResult(
         msg: { [k: string]: unknown }
@@ -709,17 +713,12 @@ export class PaintboxEditorProvider
             vscode.window.showErrorMessage(`Paintbox: print failed: ${errMsg}`);
             return;
         }
-        try {
-            await vscode.env.openExternal(tmpUri);
-            vscode.window.showInformationMessage(
-                'Paintbox: opened in your default image viewer for printing'
-            );
-        } catch {
-            // openExternal rejected (no GUI session, no handler, etc.).
-            // Surface the tmp path so the user can find the artifact.
-            vscode.window.showInformationMessage(
-                `Paintbox: print artifact saved at ${tmpPath}`
-            );
+        const choice = await vscode.window.showInformationMessage(
+            'Paintbox: print artifact saved at ' + tmpPath,
+            'Reveal in Explorer'
+        );
+        if (choice === 'Reveal in Explorer') {
+            await vscode.commands.executeCommand('revealFileInOS', tmpUri);
         }
     }
 
