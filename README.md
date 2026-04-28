@@ -75,8 +75,7 @@ any code-server installation.
 
 These are environment-imposed quirks of running miniPaint inside a VS Code webview, not bugs in paintbox itself:
 
-- **Export GIF** does nothing. miniPaint encodes GIFs via a Web Worker (`gif.worker.js`) that the webview's strict CSP currently blocks. Workaround: export as PNG and convert with an external tool. (Tracked for a future fix.)
-- **Export BMP** errors with "Browser does not support…". Most browsers don't ship a native BMP encoder, and miniPaint defers to the browser's `canvas.toBlob('image/bmp')`. No good workaround in-browser. Use PNG instead — it's lossless and universally supported.
+- **GIF and BMP files** open with VS Code's default image preview, not paintbox. miniPaint encodes GIFs via a Web Worker that the webview's CSP blocks, and most browsers don't ship a native BMP encoder. Rather than fail at save time, paintbox no longer claims these formats; right-click → Open With → Image Preview to view them.
 - **Print** writes a temporary PNG and shows a toast with the path plus a "Reveal in Explorer" button. There's no system print dialog inside a webview running on a remote server. Open the file from your local machine (or from the VS Code file tree) and print from there.
 
 For everything else, file an issue: https://github.com/NateDogDotNet/paintbox/issues

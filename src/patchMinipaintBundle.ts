@@ -1,12 +1,20 @@
 // Build-time helper: read vendor/minipaint/dist/bundle.js, replace the 8
-// `p().saveAs(` call sites with `(window.__pbBridge||p()).saveAs(`, and write
-// the result to out/webview/minipaint-bundle.patched.js.
+// `p().saveAs(` call sites with `(window.__pbBridge||p()).saveAs(`, remove the
+// GIF + BMP entries from miniPaint's SAVE_TYPES dict, and write the result to
+// out/webview/minipaint-bundle.patched.js.
 //
 // Per .orchestrator/phase4-design.md §2b plus orchestrator override Q1:
 //   - Build-time only. `npm run compile` runs this. The VSIX ships pre-patched.
 //   - Activation only verifies the artifact (verifyPatchedBundle below).
 //   - Integrity check: exactly 8 occurrences of `p().saveAs(` in the source
 //     bundle. Anything else throws so an upstream bump fails loud.
+//
+// Phase 6.8 adds a SECOND text-replace patch: strip the GIF + BMP entries
+// from miniPaint's SAVE_TYPES dict so they vanish from the Save / Export
+// dropdowns. miniPaint's GIF encoder uses a Web Worker that the webview's
+// CSP blocks, and miniPaint's BMP encoder defers to canvas.toBlob('image/bmp')
+// which most browsers don't ship. Hide them rather than leave a footgun.
+// Same fail-loud convention: assert exactly 1 occurrence before patching.
 //
 // Per orchestrator override Q9 file location: this helper lives in src/ (built
 // by the host tsconfig.json) because it uses Node `fs`/`path`. It must NOT live
@@ -18,9 +26,19 @@ import * as path from 'path';
 const SAVE_AS_PATTERN = /p\(\)\.saveAs\(/g;
 const PATCHED_REPLACEMENT = '((typeof window!=="undefined"&&window.__pbBridge)||p()).saveAs(';
 export const EXPECTED_SITES = 8;
+
+// Phase 6.8: literal substring (not a regex) — match the GIF + BMP keys
+// exactly as they appear in the bundle's SAVE_TYPES dict object literal.
+// Removing this substring cleanly elides both entries; the surviving dict is
+// `…WEBP:"Weppy File Format",TIFF:"Tag Image File Format"…`.
+const SAVE_TYPES_GIF_BMP =
+    'GIF:"Graphics Interchange Format",BMP:"Windows Bitmap",';
+export const SAVE_TYPES_GIF_BMP_EXPECTED_SITES = 1;
+
 export const PAINTBOX_HEADER =
-    '/* PAINTBOX-BUNDLE-PATCH v1: ' +
-    'p\\(\\)\\.saveAs\\( replaced ' + EXPECTED_SITES + 'x */\n';
+    '/* PAINTBOX-BUNDLE-PATCH v2: ' +
+    'p\\(\\)\\.saveAs\\( replaced ' + EXPECTED_SITES + 'x; ' +
+    'SAVE_TYPES GIF+BMP entries removed */\n';
 
 function bundleSrc(extensionRoot: string): string {
     return path.join(extensionRoot, 'vendor', 'minipaint', 'dist', 'bundle.js');
@@ -31,13 +49,30 @@ function bundleOut(extensionRoot: string): string {
 }
 
 /**
- * Read the upstream bundle, run the integrity check, and write the patched
- * bundle to `out/webview/minipaint-bundle.patched.js`. Idempotent — if the
- * output already matches the desired contents, no write happens.
+ * Count non-overlapping occurrences of a literal substring `needle` in `hay`.
+ * Avoids regex-escape gotchas for substrings containing metachars.
+ */
+function countOccurrences(hay: string, needle: string): number {
+    if (needle.length === 0) return 0;
+    let count = 0;
+    let from = 0;
+    while (true) {
+        const i = hay.indexOf(needle, from);
+        if (i < 0) return count;
+        count += 1;
+        from = i + needle.length;
+    }
+}
+
+/**
+ * Read the upstream bundle, run the integrity checks, apply both patches, and
+ * write the patched bundle to `out/webview/minipaint-bundle.patched.js`.
+ * Idempotent — if the output already matches the desired contents, no write
+ * happens.
  *
- * Throws if the source bundle's `p().saveAs(` count is not exactly
- * EXPECTED_SITES, so an upstream bump that silently changes the surface fails
- * at build time rather than at runtime.
+ * Throws if either patch's expected occurrence count doesn't match, so an
+ * upstream bump that silently changes the surface fails at build time rather
+ * than at runtime.
  */
 export function patchMinipaintBundle(extensionRoot: string): string {
     const src = bundleSrc(extensionRoot);
@@ -56,10 +91,26 @@ export function patchMinipaintBundle(extensionRoot: string): string {
         );
     }
 
-    const patched = PAINTBOX_HEADER + original.replace(
-        SAVE_AS_PATTERN,
-        PATCHED_REPLACEMENT
-    );
+    // Phase 6.8: SAVE_TYPES GIF+BMP integrity check. Same fail-loud contract
+    // as the saveAs check — exactly 1 occurrence expected; anything else
+    // means upstream rearranged the dict and we need to re-audit.
+    const saveTypesCount = countOccurrences(original, SAVE_TYPES_GIF_BMP);
+    if (saveTypesCount !== SAVE_TYPES_GIF_BMP_EXPECTED_SITES) {
+        throw new Error(
+            'Paintbox: miniPaint bundle SAVE_TYPES integrity check failed. ' +
+            'Expected ' + SAVE_TYPES_GIF_BMP_EXPECTED_SITES +
+            ' occurrence of the GIF+BMP SAVE_TYPES entries, found ' +
+            saveTypesCount + '. ' +
+            'The vendored bundle may have been updated upstream — ' +
+            're-audit before proceeding.'
+        );
+    }
+
+    const patched = PAINTBOX_HEADER + original
+        .replace(SAVE_AS_PATTERN, PATCHED_REPLACEMENT)
+        // Plain-string .replace (no regex) — the literal substring is
+        // unambiguous and contains no regex metachars worth defending against.
+        .replace(SAVE_TYPES_GIF_BMP, '');
 
     // Idempotent fast path: don't rewrite if the file already matches.
     if (fs.existsSync(out) && fs.readFileSync(out, 'utf8') === patched) {
@@ -84,10 +135,13 @@ export function patchMinipaintBundle(extensionRoot: string): string {
  *
  * Confirms `out/webview/minipaint-bundle.patched.js` exists and contains
  * exactly EXPECTED_SITES patched call sites with zero remaining bare
- * `p().saveAs(` matches. Throws a user-readable error if any check fails;
- * `activate()` lets the throw bubble so VS Code surfaces "Activating
- * extension 'paintbox' failed: <reason>" — exactly what we want when the
- * VSIX or local checkout is missing the build artifact.
+ * `p().saveAs(` matches. Phase 6.8 also asserts the SAVE_TYPES GIF+BMP
+ * entries are gone AND that the adjacent TIFF entry survives (regression
+ * guard against the substring patch chewing past its boundaries). Throws a
+ * user-readable error if any check fails; `activate()` lets the throw bubble
+ * so VS Code surfaces "Activating extension 'paintbox' failed: <reason>" —
+ * exactly what we want when the VSIX or local checkout is missing the build
+ * artifact.
  */
 export function verifyPatchedBundle(extensionRoot: string): void {
     const out = bundleOut(extensionRoot);
@@ -131,5 +185,19 @@ export function verifyPatchedBundle(extensionRoot: string): void {
         return fail(
             'found ' + bareMatches.length + ' un-rewritten "p().saveAs(" call sites'
         );
+    }
+
+    // Phase 6.8: SAVE_TYPES patch verification.
+    if (countOccurrences(contents, 'GIF:"Graphics Interchange Format"') !== 0) {
+        return fail('expected 0 occurrences of GIF SAVE_TYPES entry');
+    }
+    if (countOccurrences(contents, 'BMP:"Windows Bitmap"') !== 0) {
+        return fail('expected 0 occurrences of BMP SAVE_TYPES entry');
+    }
+    // Regression guard: TIFF was the entry immediately following BMP in the
+    // upstream dict. A miss-bounded substring patch would eat it too. Assert
+    // it's still present so that failure mode fails the build, not a user.
+    if (countOccurrences(contents, 'TIFF:"Tag Image File Format"') !== 1) {
+        return fail('expected adjacent TIFF SAVE_TYPES entry to survive');
     }
 }

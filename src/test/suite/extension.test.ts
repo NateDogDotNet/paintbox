@@ -316,6 +316,10 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
         // pretest runs `npm run compile`, so by the time this test runs the
         // artifact is present and the extension activated cleanly. We assert
         // the file system invariants directly.
+        //
+        // Phase 6.8 added the SAVE_TYPES GIF+BMP strip patch + bumped the
+        // header to v2; assertions below cover both patches plus the TIFF
+        // regression guard.
 
         const repoRoot = path.resolve(__dirname, '../../..');
         const patchedPath = path.join(repoRoot, 'out', 'webview', 'minipaint-bundle.patched.js');
@@ -331,7 +335,7 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
         const firstLine = contents.split('\n', 1)[0];
         assert.strictEqual(
             firstLine,
-            '/* PAINTBOX-BUNDLE-PATCH v1: p\\(\\)\\.saveAs\\( replaced 8x */',
+            '/* PAINTBOX-BUNDLE-PATCH v2: p\\(\\)\\.saveAs\\( replaced 8x; SAVE_TYPES GIF+BMP entries removed */',
             `unexpected first line of patched bundle: ${firstLine}`
         );
 
@@ -346,7 +350,7 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
         );
 
         // Zero remaining bare `p().saveAs(` (after stripping the header).
-        const header = '/* PAINTBOX-BUNDLE-PATCH v1: p\\(\\)\\.saveAs\\( replaced 8x */\n';
+        const header = '/* PAINTBOX-BUNDLE-PATCH v2: p\\(\\)\\.saveAs\\( replaced 8x; SAVE_TYPES GIF+BMP entries removed */\n';
         const body = contents.startsWith(header) ? contents.slice(header.length) : contents;
         const bareRe = /(?:^|[^)])p\(\)\.saveAs\(/g;
         const bareMatches = body.match(bareRe);
@@ -356,11 +360,68 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
             `expected 0 bare p().saveAs( call sites in patched bundle; found ${bareMatches ? bareMatches.length : 0}`
         );
 
+        // Phase 6.8: GIF + BMP entries must be gone from the SAVE_TYPES dict.
+        assert.strictEqual(
+            (contents.match(/GIF:"Graphics Interchange Format"/g) || []).length,
+            0,
+            'GIF SAVE_TYPES entry must be removed from patched bundle'
+        );
+        assert.strictEqual(
+            (contents.match(/BMP:"Windows Bitmap"/g) || []).length,
+            0,
+            'BMP SAVE_TYPES entry must be removed from patched bundle'
+        );
+        // Regression guard: TIFF was the entry adjacent to the removed pair —
+        // a substring patch that overshot would chew through TIFF too.
+        assert.strictEqual(
+            (contents.match(/TIFF:"Tag Image File Format"/g) || []).length,
+            1,
+            'TIFF SAVE_TYPES entry must survive the GIF+BMP removal'
+        );
+
         // Activation should have run cleanly (the EDH would have failed loud
         // in beforeAll otherwise). Just sanity-check the extension is active.
         const ext = vscode.extensions.getExtension(EXTENSION_ID);
         await ext!.activate();
         assert.strictEqual(ext!.isActive, true, 'extension should be active');
+    });
+
+    // ---------- Test 6.8a: customEditor selectors no longer claim GIF/BMP ----
+
+    test('6.8a — package.json customEditor selectors no longer include *.gif or *.bmp', () => {
+        // Phase 6.8: paintbox stops claiming GIF + BMP. VS Code's default
+        // image preview takes over for those formats. Read package.json from
+        // disk and walk `contributes.customEditors[0].selector` so the test
+        // catches selector regressions independently of the in-process
+        // activation result.
+        const repoRoot = path.resolve(__dirname, '../../..');
+        const pkgPath = path.join(repoRoot, 'package.json');
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as {
+            contributes?: {
+                customEditors?: Array<{
+                    viewType?: string;
+                    selector?: Array<{ filenamePattern?: string }>;
+                }>;
+            };
+        };
+        const editors = pkg.contributes?.customEditors;
+        assert.ok(editors && editors.length > 0,
+            'expected at least one customEditor in package.json');
+        const editor = editors![0];
+        assert.strictEqual(editor.viewType, 'paintbox.imageEditor',
+            'first customEditor must be paintbox.imageEditor');
+        const patterns = (editor.selector || [])
+            .map((s) => (s.filenamePattern || '').toLowerCase());
+
+        assert.ok(!patterns.includes('*.gif'),
+            `*.gif must NOT be in selector list; got: ${JSON.stringify(patterns)}`);
+        assert.ok(!patterns.includes('*.bmp'),
+            `*.bmp must NOT be in selector list; got: ${JSON.stringify(patterns)}`);
+        // Positive guard: the four supported formats must still be present.
+        for (const expected of ['*.png', '*.jpg', '*.jpeg', '*.webp']) {
+            assert.ok(patterns.includes(expected),
+                `${expected} must be in selector list; got: ${JSON.stringify(patterns)}`);
+        }
     });
 
     test('3c — real round-trip with pixel.png shows ready (slow)', async function () {

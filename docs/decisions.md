@@ -539,4 +539,76 @@ zero CSP bytes changed. Bumped to v0.0.5.
 
 ---
 
+**2026-04-28 — Phase 6.8 hide GIF + BMP from SAVE_TYPES dropdown; drop selectors**
+
+Burn-in of v0.0.5 confirmed Phase 6.7's print fix and TIFF round-trip work.
+Two formats remained broken: Export GIF (silent fail — gif.worker.js is
+CSP-hostile under the webview sandbox) and Export BMP (browser doesn't
+support `canvas.toBlob('image/bmp')`). User chose **Option A — hide vs.
+real-fix**: rather than relax CSP for a worker URL or vendor a JS-side BMP
+encoder, paintbox stops claiming these formats entirely.
+
+Three coordinated changes:
+
+1. **Bundle text-replace patch (phase 2 of `patchMinipaintBundle`).** A
+   second precise-substring patch removes `GIF:"Graphics Interchange
+   Format",BMP:"Windows Bitmap",` from miniPaint's `SAVE_TYPES` dict so the
+   GIF + BMP entries no longer appear in the Save / Export dropdown. Same
+   fail-loud convention as the Phase 4 `p().saveAs(` patch: assert exactly
+   1 occurrence before patching, throw on 0 or >1. Header bumped to v2
+   (`PAINTBOX-BUNDLE-PATCH v2: p\(\)\.saveAs\( replaced 8x; SAVE_TYPES
+   GIF+BMP entries removed`). `verifyPatchedBundle` now asserts 0 occurrences
+   of either entry AND that the adjacent `TIFF:"Tag Image File Format"`
+   entry survives — regression guard against an overshot substring patch.
+
+   Why text-replace and not a source patch: same reasoning as Phase 4 —
+   `vendor/minipaint/src/js/modules/file/save.js` is not loaded at runtime
+   (`index.html` only loads `dist/bundle.js`). A source-only patch would be
+   dead text. Bundle stays byte-identical to upstream
+   (`d084e26…83356`); the patched bundle in `out/webview/` is the only
+   mutated artifact.
+
+2. **Drop `*.gif` + `*.bmp` from `package.json` customEditor selectors.**
+   Cleaner story than "you can edit a `.gif` but only with PNG export."
+   Users opening a GIF or BMP get VS Code's default image preview — same
+   experience they had before paintbox was installed. Symmetric updates:
+   `MIME_BY_EXT` and `FORMAT_BY_EXT` (editorProvider.ts) drop the entries;
+   `SAVE_DIALOG_FILTERS` drops them too; the shim's `MIME_BY_EXT` drops
+   them. Gate 1 in `_writeViaWebview` now rejects `.gif`/`.bmp` destinations
+   with the friendly "extension not supported" error — that's the §3
+   mitigation for any user who has a stale `.gif`/`.bmp` paintbox tab open
+   from before the upgrade and hits Ctrl-S.
+
+3. **§3 investigation finding.** miniPaint's `save_action`
+   (`vendor/minipaint/src/js/modules/file/save.js:484-488`) DOES iterate
+   `this.SAVE_TYPES` to detect type from filename — but only as a fallback
+   when `user_response.type` is unset, and our shim always sets it
+   explicitly. So removing GIF/BMP from SAVE_TYPES doesn't break
+   `save_action`'s explicit-`type` path. In-place save of a `.gif`/`.bmp`
+   file would still hit the broken GIF / BMP encoder branch IF it reached
+   `save_action`, but the host's Gate 1 (FORMAT_BY_EXT lookup) rejects
+   first, before the request ever leaves the host. No separate Gate 2 MIME
+   check required.
+
+**Test additions / updates (33 → 34).** Test 4c updated to assert the v2
+header, the GIF + BMP entries gone, and the TIFF regression guard. New Test
+6.8a reads `package.json` from disk and walks
+`contributes.customEditors[0].selector` to assert `*.gif`/`*.bmp` are
+absent and the four supported patterns (`*.png`/`*.jpg`/`*.jpeg`/`*.webp`)
+remain. Test 6e (existing GIF cross-format Save As guard) still passes
+unchanged: the cross-format guard in `saveCustomDocumentAs` fires before
+Gate 1, so the original error message (`Save As to GIF across formats is
+not supported`) survives.
+
+README "Known limitations" replaced the two GIF + BMP bullets with a single
+paragraph explaining VS Code's default image preview now handles those
+formats. Print bullet unchanged.
+
+Bundle `vendor/minipaint/dist/bundle.js` SHA-256 unchanged
+(`d084e26…83356`); the second patch surface is in `out/webview/` only.
+`patchMinipaintBundle.ts` patch surface count: 8 saveAs sites + 1
+SAVE_TYPES site. Bumped to v0.0.6.
+
+---
+
 *(Add new entries at the bottom, newest last.)*

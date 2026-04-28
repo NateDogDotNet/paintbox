@@ -35,18 +35,21 @@ class ImageDocument implements vscode.CustomDocument {
 }
 
 /**
- * Phase 3 file extension → MIME map. Covers exactly the six extensions
+ * Phase 3 file extension → MIME map. Covers exactly the four extensions
  * declared in `package.json` `contributes.customEditors[].selector`. Anything
  * else (e.g. `.tiff`) gets a synthesized `image/octet-stream` and the shim
  * surfaces a defensive error overlay (see Phase 3 design §9 Q1).
+ *
+ * Phase 6.8 dropped `.gif` and `.bmp`: miniPaint's GIF encoder uses a
+ * Web Worker that the webview's CSP blocks, and most browsers don't ship
+ * a native BMP encoder. Rather than fail at save time, paintbox no longer
+ * claims those formats — VS Code's default image preview still opens them.
  */
 const MIME_BY_EXT: Record<string, string> = {
     '.png':  'image/png',
     '.jpg':  'image/jpeg',
     '.jpeg': 'image/jpeg',
-    '.gif':  'image/gif',
     '.webp': 'image/webp',
-    '.bmp':  'image/bmp',
 };
 
 /**
@@ -59,13 +62,11 @@ const MIME_BY_EXT: Record<string, string> = {
  * path (load message) where we don't need miniPaint's format key; FORMAT_BY_EXT
  * serves the SAVE path (requestSave message).
  */
-const FORMAT_BY_EXT: Record<string, { format: 'PNG'|'JPG'|'WEBP'|'BMP'|'GIF'; mime: string }> = {
+const FORMAT_BY_EXT: Record<string, { format: 'PNG'|'JPG'|'WEBP'; mime: string }> = {
     '.png':  { format: 'PNG',  mime: 'image/png'  },
     '.jpg':  { format: 'JPG',  mime: 'image/jpeg' },
     '.jpeg': { format: 'JPG',  mime: 'image/jpeg' },
     '.webp': { format: 'WEBP', mime: 'image/webp' },
-    '.bmp':  { format: 'BMP',  mime: 'image/bmp'  },
-    '.gif':  { format: 'GIF',  mime: 'image/gif'  },
 };
 
 const SAVE_TIMEOUT_MS = 30_000;
@@ -84,10 +85,8 @@ const SAVE_DIALOG_FILTERS: Record<string, { [k: string]: string[] }> = {
     'image/jpeg':  { 'JPEG image':        ['jpg', 'jpeg'] },
     'WEBP':        { 'WebP image':        ['webp'] },
     'image/webp':  { 'WebP image':        ['webp'] },
-    'GIF':         { 'GIF image':         ['gif'] },
-    'image/gif':   { 'GIF image':         ['gif'] },
-    'BMP':         { 'BMP image':         ['bmp'] },
-    'image/bmp':   { 'BMP image':         ['bmp'] },
+    // Phase 6.8: GIF + BMP entries dropped — those formats are no longer
+    // claimed by paintbox (see MIME_BY_EXT note).
     'JSON':        { 'miniPaint layered': ['json'] },
     'application/json': { 'miniPaint layered': ['json'] },
     'TIFF':        { 'TIFF image':        ['tiff'] },
@@ -109,7 +108,7 @@ function deriveMime(uri: vscode.Uri): string {
 interface PendingMeta {
     uri: vscode.Uri;
     expectedMime: string;
-    expectedFormat: 'PNG' | 'JPG' | 'WEBP' | 'BMP' | 'GIF';
+    expectedFormat: 'PNG' | 'JPG' | 'WEBP';
 }
 
 /**
@@ -555,7 +554,7 @@ export class PaintboxEditorProvider
         if (!formatEntry) {
             throw new Error(
                 `Paintbox: cannot save to "${destination.fsPath}" — extension "${ext}" is not supported. ` +
-                'Supported extensions: .png, .jpg, .jpeg, .webp, .bmp, .gif.'
+                'Supported extensions: .png, .jpg, .jpeg, .webp.'
             );
         }
         const { format, mime } = formatEntry;

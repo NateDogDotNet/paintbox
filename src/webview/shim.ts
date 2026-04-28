@@ -109,10 +109,11 @@ type HostMessage = LoadMessage | { type: string; [k: string]: unknown };
         'png': 'image/png',
         'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
         'webp': 'image/webp',
-        'bmp': 'image/bmp',
-        'gif': 'image/gif',
         // Phase 4 forwards these even though they're not in package.json's
         // declared selectors. Phase 5's host-side Gate 2 rejects MIME mismatches.
+        // Phase 6.8 dropped 'gif' and 'bmp' — paintbox no longer claims those
+        // formats; the host's Gate 1 rejects them anyway. Kept TIFF/AVIF/JSON
+        // because the unsolicited-saveResult path (Export) still allows them.
         'tiff': 'image/tiff', 'avif': 'image/avif', 'json': 'application/json',
     };
     function deriveMimeFromBlob(blob: Blob, fname: string): string {
