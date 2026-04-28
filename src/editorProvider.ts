@@ -126,6 +126,21 @@ export class PaintboxEditorProvider
         return PaintboxEditorProvider._activeInstance;
     }
 
+    /**
+     * Phase 6.5 test seam: register a callback fired the first time ANY
+     * resolved editor receives a `{type:'ready'}` message. Returns a
+     * Disposable that removes the callback. Used by Test 3c to assert the
+     * miniPaint init round-trip actually completed (vs. waiting blindly on
+     * a setTimeout). Naming convention matches `__pbTestGetMeta`.
+     */
+    private static readonly _readyCallbacks = new Set<(uri: vscode.Uri) => void>();
+    static __pbTestOnReady(cb: (uri: vscode.Uri) => void): vscode.Disposable {
+        PaintboxEditorProvider._readyCallbacks.add(cb);
+        return new vscode.Disposable(() => {
+            PaintboxEditorProvider._readyCallbacks.delete(cb);
+        });
+    }
+
     static register(context: vscode.ExtensionContext): vscode.Disposable {
         return vscode.window.registerCustomEditorProvider(
             PaintboxEditorProvider.VIEW_TYPE,
@@ -224,12 +239,26 @@ export class PaintboxEditorProvider
                     await this._postLoadToWebview(webviewPanel, document);
                     return;
                 case 'ready':
+                    // Phase 6.5 test seam: notify any registered ready
+                    // listeners. Production code path is unchanged; the Set
+                    // is empty unless tests subscribed. Callbacks are
+                    // best-effort — a throwing test seam must not break the
+                    // production message loop.
+                    for (const cb of PaintboxEditorProvider._readyCallbacks) {
+                        try { cb(document.uri); } catch { /* never throw out of message handler */ }
+                    }
                     return;
-                case 'loadError':
+                case 'loadError': {
+                    const fullErr = String(msg.error || 'unknown error');
+                    // v0.0.2 burn-in: the full diagnostic JSON may be longer
+                    // than the toast can show. Always log to the Extension
+                    // Host channel so it's recoverable from the Output panel.
+                    console.error('[paintbox] loadError:', fullErr, '(', document.uri.toString(), ')');
                     vscode.window.showErrorMessage(
-                        `Paintbox: ${String(msg.error || 'unknown error')} (${document.uri.toString()})`
+                        `Paintbox: ${fullErr} (${path.basename(document.uri.fsPath)})`
                     );
                     return;
+                }
                 case 'dirty': {
                     // Phase 5 §1: shim's once-per-save gate guarantees at most
                     // one dirty per epoch, but gate again here in case of

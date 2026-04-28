@@ -307,24 +307,41 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
     });
 
     test('3c — real round-trip with pixel.png shows ready (slow)', async function () {
-        // This test drives the real provider via vscode.openWith. The webview
-        // boots miniPaint for real, runs the shim, posts webviewReady, the
-        // host posts load, the shim hands the data-URL to miniPaint, and the
-        // shim eventually posts ready. We can't directly observe the webview's
-        // outbound messages because vscode.openWith returns no panel handle,
-        // so we just assert that the open call resolves cleanly and that no
-        // error notification was raised. Per Q5 this is the "automatable
-        // smoke" tier — demotion to manual is acceptable if it flakes.
-        this.timeout(15000);
+        // Phase 6.5: This test drives the real provider via vscode.openWith.
+        // The webview boots miniPaint for real, runs the shim, posts
+        // webviewReady, the host posts load, the shim hands the data-URL to
+        // miniPaint, and the shim eventually posts ready. Phase 6.5 tightens
+        // the assertion: instead of a fixed 4s wait + "no error toast",
+        // race three signals — success (host received `{type:'ready'}` via
+        // __pbTestOnReady), failure (mocked showErrorMessage fired), or
+        // timeout (12s, covering the shim's 10s waitForMiniPaint plus margin).
+        // 15s mocha timeout was tight against a 12s race — bump to 20s to
+        // absorb harness startup overhead.
+        this.timeout(20000);
 
         const ext = vscode.extensions.getExtension(EXTENSION_ID);
         await ext!.activate();
 
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const providerModule = require('../../editorProvider');
+        const Provider = providerModule.PaintboxEditorProvider;
+
         let errorShown: string | undefined;
         const origShowError = vscode.window.showErrorMessage;
+
+        // Subscribe BEFORE openWith so we don't miss the ready signal.
+        let resolveReady: ((value: 'ready') => void) | undefined;
+        const readyPromise = new Promise<'ready'>((resolve) => { resolveReady = resolve; });
+        const readySub: vscode.Disposable = Provider.__pbTestOnReady(() => {
+            if (resolveReady) resolveReady('ready');
+        });
+
+        let resolveError: ((value: 'error') => void) | undefined;
+        const errorPromise = new Promise<'error'>((resolve) => { resolveError = resolve; });
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (vscode.window as any).showErrorMessage = async (msg: string, ..._items: unknown[]) => {
             errorShown = msg;
+            if (resolveError) resolveError('error');
             return undefined;
         };
 
@@ -334,19 +351,130 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
                 realFixtureUri,
                 'paintbox.imageEditor'
             );
-            // Give miniPaint time to boot inside the webview and the shim's
-            // double-rAF heuristic time to fire ready.
-            await new Promise<void>((resolve) => setTimeout(resolve, 4000));
+
+            const timeoutPromise = new Promise<'timeout'>((resolve) =>
+                setTimeout(() => resolve('timeout'), 12000));
+
+            const outcome = await Promise.race([readyPromise, errorPromise, timeoutPromise]);
+
+            if (outcome === 'error') {
+                assert.fail(`miniPaint signaled loadError: ${errorShown}`);
+            }
+            if (outcome === 'timeout') {
+                assert.fail('miniPaint did not signal ready within 12s');
+            }
+            assert.strictEqual(outcome, 'ready');
         } finally {
+            readySub.dispose();
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (vscode.window as any).showErrorMessage = origShowError;
             await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
         }
+    });
 
-        assert.strictEqual(
-            errorShown,
-            undefined,
-            `unexpected error shown by extension: ${errorShown}`
-        );
+    // ---------- Test 3d: regression guard for Phase 6.5 init path -----------
+
+    test('3d — shim emits loadError + diagnostic dump when window globals are missing', async () => {
+        // Phase 6.5 regression guard: if upstream stops exposing
+        // `window.FileOpen`, the shim must surface a self-diagnosing
+        // loadError instead of dying silently. Pure VM-sandbox unit test —
+        // pattern parallels Test 4a's harness.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const vm = require('vm');
+        const shimPath = path.resolve(__dirname, '../../webview/shim.js');
+        assert.ok(fs.existsSync(shimPath), `expected compiled shim at ${shimPath}`);
+        const shimSource = fs.readFileSync(shimPath, 'utf8');
+
+        const posted: Array<{ [k: string]: unknown }> = [];
+        const fakeVscode = {
+            postMessage: (m: { [k: string]: unknown }) => { posted.push(m); },
+            getState: () => undefined,
+            setState: (_s: unknown) => undefined,
+        };
+
+        const eventListeners: Record<string, Array<(e: unknown) => void>> = {};
+        const fakeDocument = {
+            // 'loading' so the shim defers init until we fire DOMContentLoaded.
+            readyState: 'loading',
+            body: { dataset: {} as Record<string, string> },
+            scripts: [] as Array<{ src: string }>,
+            getElementById: (_id: string) => null,
+            addEventListener: (
+                ev: string,
+                cb: (e: unknown) => void,
+                _opts?: unknown
+            ) => {
+                (eventListeners[ev] = eventListeners[ev] || []).push(cb);
+            },
+        };
+        // window has NEITHER FileOpen, FileSave, nor State — the regression
+        // condition we're guarding against.
+        const fakeWindow: { [k: string]: unknown } = {
+            addEventListener: (
+                ev: string,
+                cb: (e: unknown) => void,
+                _opts?: unknown
+            ) => {
+                (eventListeners[ev] = eventListeners[ev] || []).push(cb);
+            },
+            __pbTestVsCode: fakeVscode,
+        };
+
+        // Time control: stub Date.now so the FIRST call returns 0 (captured
+        // by waitForMiniPaint's `start = Date.now()`), and subsequent calls
+        // return 11_000 (well past the 10s timeout). The shim's first
+        // setTimeout(tick, 50) then observes elapsed > timeoutMs and rejects
+        // immediately. Total wall-time: ~50ms instead of 10s.
+        let nowCallCount = 0;
+        const fakeDate = { now: () => (nowCallCount++ === 0 ? 0 : 11_000) };
+
+        const sandbox: { [k: string]: unknown } = {
+            window: fakeWindow,
+            document: fakeDocument,
+            Promise,
+            setTimeout,
+            requestAnimationFrame: (cb: () => void) => { cb(); },
+            console: { log: () => undefined, error: () => undefined, warn: () => undefined },
+            Date: fakeDate,
+            Array,
+            Object,
+            Error,
+            JSON,
+            String,
+            acquireVsCodeApi: () => {
+                throw new Error('acquireVsCodeApi() should not be called when __pbTestVsCode is set');
+            },
+        };
+        sandbox.globalThis = sandbox;
+        vm.createContext(sandbox);
+        vm.runInContext(shimSource, sandbox, { filename: 'shim.js' });
+
+        // The shim registered a DOMContentLoaded listener (readyState='loading').
+        const dclListeners = eventListeners['DOMContentLoaded'] || [];
+        assert.ok(dclListeners.length > 0, 'shim should register a DOMContentLoaded listener');
+
+        // Drive init. waitForMiniPaint will capture start=0 from the first
+        // Date.now() call; the very first setTimeout-scheduled tick sees
+        // Date.now()=11000, which exceeds the 10s timeout, and rejects.
+        for (const cb of dclListeners) cb(undefined);
+
+        // Wait long enough for the first real setTimeout(tick, 50) to fire
+        // and the rejection to propagate through the promise chain.
+        await new Promise<void>((resolve) => setTimeout(resolve, 200));
+
+        const loadErr = posted.find((m) => m.type === 'loadError');
+        assert.ok(loadErr, `expected a loadError postMessage; saw: ${JSON.stringify(posted.map((m) => m.type))}`);
+        const errStr = String(loadErr!.error || '');
+        assert.match(errStr, /miniPaint init timeout/,
+            `loadError should reference 'miniPaint init timeout'; got: ${errStr}`);
+        // Diagnostic dump fields per Phase 6.5 design.
+        assert.match(errStr, /hasFileOpen/, 'loadError should include hasFileOpen diagnostic');
+        assert.match(errStr, /hasFileSave/, 'loadError should include hasFileSave diagnostic');
+        assert.match(errStr, /hasState/, 'loadError should include hasState diagnostic');
+        assert.match(errStr, /hasFileOpenHandler/, 'loadError should include hasFileOpenHandler diagnostic');
+
+        const ready = posted.find((m) => m.type === 'webviewReady');
+        assert.strictEqual(ready, undefined,
+            'webviewReady must NOT be posted when window globals are missing');
     });
 });

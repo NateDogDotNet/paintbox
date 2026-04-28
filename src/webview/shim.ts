@@ -10,16 +10,19 @@
 //   download. See .orchestrator/phase4-design.md §5.
 //   Phase 5 — close the round-trip:
 //     • handle host→webview {type:'requestSave', requestId, format, filename}
-//       by calling app.File_save.save_action({…}, false) directly, bypassing
+//       by calling window.FileSave.save_action({…}, false) directly, bypassing
 //       miniPaint's modal export popup;
-//     • install a dirty-tracking hook (monkey-patch app.State.do_action) that
-//       posts {type:'dirty'} once per save epoch;
+//     • install a dirty-tracking hook (monkey-patch window.State.do_action)
+//       that posts {type:'dirty'} once per save epoch;
 //     • forward `requestId` through the __pbBridge.saveAs intercept so the
 //       host's saveResult correlator can match the response;
 //     • reset the dirty gate when the host posts {type:'saved'}.
+//   Phase 6.5 — switch the polling target from `window.app.File_open` (never
+//   set by miniPaint v4.14.3's bundle) to upstream-exposed `window.FileOpen`
+//   / `window.FileSave` / `window.State`. See .orchestrator/phase6.5-design.md.
 //
 // Design contract: see .orchestrator/phase3-design.md §6 + phase4-design.md §5
-// + phase5-design.md §1 and §2.
+// + phase5-design.md §1 and §2 + phase6.5-design.md §2.
 //
 // IMPORTANT — build constraints:
 //   This file compiles via tsconfig.webview.json (module:"none", target:"ES2020").
@@ -34,19 +37,23 @@ declare function acquireVsCodeApi(): {
     setState: (state: unknown) => void;
 };
 
-interface MiniPaintApp {
-    File_open?: {
-        file_open_data_url_handler?: (dataUrl: string) => unknown;
-    };
-    File_save?: {
-        // miniPaint's `save_action(user_response, autoname)` is the
-        // non-popup entry point. Its `user_response` shape is read from
-        // vendor/minipaint/src/js/modules/file/save.js (see Phase 5 design §2).
-        save_action?: (user_response: unknown, autoname: boolean) => unknown;
-    };
-    State?: {
-        do_action?: (action: unknown) => unknown;
-    };
+// Phase 6.5: miniPaint v4.14.3's compiled bundle never sets `window.app`. The
+// upstream `app` singleton is module-private (webpack minifies it to `v.A`).
+// What the bundle DOES expose, deliberately, are three module classes on
+// window: `window.FileOpen`, `window.FileSave`, `window.State`. The shim uses
+// THOSE directly. See .orchestrator/phase6.5-design.md §2 for the byte-dump
+// evidence and rejected-alternative rationale.
+interface MiniPaintFileOpen {
+    file_open_data_url_handler?: (dataUrl: string) => unknown;
+}
+interface MiniPaintFileSave {
+    // miniPaint's `save_action(user_response, autoname)` is the non-popup
+    // entry point. Its `user_response` shape is read from
+    // vendor/minipaint/src/js/modules/file/save.js (see Phase 5 design §2).
+    save_action?: (user_response: unknown, autoname: boolean) => unknown;
+}
+interface MiniPaintState {
+    do_action?: (action: unknown) => unknown;
 }
 
 interface LoadMessage {
@@ -59,6 +66,20 @@ interface LoadMessage {
 type HostMessage = LoadMessage | { type: string; [k: string]: unknown };
 
 (function pbShim(): void {
+    // v0.0.2 burn-in diagnostics: capture any global errors fired BEFORE
+    // miniPaint finishes init. These are appended to the waitForMiniPaint
+    // timeout error so the user can see what actually broke without needing
+    // to switch DevTools iframe context.
+    const __pbBootErrors: string[] = [];
+    window.addEventListener('error', (e: ErrorEvent) => {
+        __pbBootErrors.push(`error: ${e.message || '?'} @ ${e.filename || '?'}:${e.lineno || '?'}`);
+    });
+    window.addEventListener('unhandledrejection', (e: PromiseRejectionEvent) => {
+        const r = e.reason as { message?: string } | string | undefined;
+        const msg = (r && typeof r === 'object' && r.message) ? r.message : String(r);
+        __pbBootErrors.push(`unhandledrejection: ${msg}`);
+    });
+
     // Phase 4 §8 Test 4a test seam: allow tests to inject a fake vscode handle
     // before the shim's IIFE runs (by setting `window.__pbTestVsCode`).
     // Production code never sets this global, so production behavior is
@@ -174,25 +195,51 @@ type HostMessage = LoadMessage | { type: string; [k: string]: unknown };
         }
     }
 
-    function getApp(): MiniPaintApp | undefined {
-        return (window as unknown as { app?: MiniPaintApp }).app;
+    function getFileOpen(): MiniPaintFileOpen | undefined {
+        return (window as unknown as { FileOpen?: MiniPaintFileOpen }).FileOpen;
+    }
+    function getFileSave(): MiniPaintFileSave | undefined {
+        return (window as unknown as { FileSave?: MiniPaintFileSave }).FileSave;
+    }
+    function getState(): MiniPaintState | undefined {
+        return (window as unknown as { State?: MiniPaintState }).State;
     }
 
     function waitForMiniPaint(timeoutMs: number): Promise<void> {
         return new Promise((resolve, reject) => {
             const start = Date.now();
             const tick = (): void => {
-                const app = getApp();
+                const fileOpen = getFileOpen();
                 if (
-                    app &&
-                    app.File_open &&
-                    typeof app.File_open.file_open_data_url_handler === 'function'
+                    fileOpen &&
+                    typeof fileOpen.file_open_data_url_handler === 'function'
                 ) {
                     resolve();
                     return;
                 }
                 if (Date.now() - start > timeoutMs) {
-                    reject(new Error('miniPaint failed to initialize within ' + timeoutMs + 'ms'));
+                    // v0.0.2 burn-in: dump everything we know about the
+                    // miniPaint init state so the failure is self-diagnosing.
+                    // Phase 6.5: surface dump now reflects the upstream
+                    // window globals the shim actually depends on.
+                    const fileSave = getFileSave();
+                    const state = getState();
+                    const dump = {
+                        docReady: document.readyState,
+                        hasFileOpen: !!fileOpen,
+                        hasFileSave: !!fileSave,
+                        hasState: !!state,
+                        hasFileOpenHandler:
+                            !!(fileOpen && typeof fileOpen.file_open_data_url_handler === 'function'),
+                        bootErrors: __pbBootErrors.slice(0, 6),
+                        scripts: Array.from(document.scripts).map(
+                            (s) => s.src || '(inline)'
+                        ).slice(0, 12),
+                    };
+                    reject(new Error(
+                        'miniPaint init timeout (' + timeoutMs + 'ms). ' +
+                        JSON.stringify(dump)
+                    ));
                     return;
                 }
                 setTimeout(tick, 50);
@@ -212,16 +259,15 @@ type HostMessage = LoadMessage | { type: string; [k: string]: unknown };
     }
 
     /**
-     * Phase 5 §1: install the dirty-tracking monkey-patch on
-     * `app.State.do_action`. Falls back to a one-shot pointerdown listener
-     * if `app.State.do_action` is missing (defensive against upstream drift).
+     * Phase 5 §1 / Phase 6.5: install the dirty-tracking monkey-patch on
+     * `window.State.do_action`. Falls back to a one-shot pointerdown listener
+     * if `State.do_action` is missing (defensive against upstream drift).
      */
     function installDirtyHook(): void {
-        const app = getApp();
-        const state = app && app.State;
-        if (!app || !state || typeof state.do_action !== 'function') {
+        const state = getState();
+        if (!state || typeof state.do_action !== 'function') {
             // eslint-disable-next-line no-console
-            console.warn('[paintbox] app.State.do_action unavailable; falling back to pointerdown dirty trigger');
+            console.warn('[paintbox] window.State.do_action unavailable; falling back to pointerdown dirty trigger');
             document.addEventListener('pointerdown', signalDirty, { once: true });
             return;
         }
@@ -243,10 +289,9 @@ type HostMessage = LoadMessage | { type: string; [k: string]: unknown };
         const format = String(m.format || 'PNG');     // 'PNG'|'JPG'|...
         const filename = String(m.filename || 'image.png');
         try {
-            const app = getApp();
-            const fileSave = app && app.File_save;
-            if (!app || !fileSave || typeof fileSave.save_action !== 'function') {
-                throw new Error('miniPaint File_save API is unavailable');
+            const fileSave = getFileSave();
+            if (!fileSave || typeof fileSave.save_action !== 'function') {
+                throw new Error('miniPaint FileSave API is unavailable');
             }
             // Stash requestId so the bridge attaches it to the eventual
             // saveResult / saveError. Cleared by the bridge after first use.
@@ -336,16 +381,16 @@ type HostMessage = LoadMessage | { type: string; [k: string]: unknown };
 
             setState('loading', { filename });
             try {
-                const app = getApp();
-                if (!app || !app.File_open || !app.File_open.file_open_data_url_handler) {
-                    throw new Error('miniPaint File_open API is unavailable');
+                const fileOpen = getFileOpen();
+                if (!fileOpen || !fileOpen.file_open_data_url_handler) {
+                    throw new Error('miniPaint FileOpen API is unavailable');
                 }
-                app.File_open.file_open_data_url_handler(dataUrl);
+                fileOpen.file_open_data_url_handler(dataUrl);
                 // miniPaint's open path is async-ish (Image.onload). The
                 // double-rAF heuristic gives the browser time to decode the
                 // <img> and miniPaint time to commit a layer before we declare
                 // ready. Phase 3 design §6 notes the upgrade path if this
-                // proves flaky (monkey-patch app.State.do_action).
+                // proves flaky (monkey-patch window.State.do_action).
                 requestAnimationFrame(() =>
                     requestAnimationFrame(() => {
                         // After a fresh load, the canvas matches disk: clear
@@ -365,7 +410,7 @@ type HostMessage = LoadMessage | { type: string; [k: string]: unknown };
         waitForMiniPaint(10000).then(
             () => {
                 // Phase 5 §1: arm dirty tracking AFTER miniPaint is ready
-                // (so app.State.do_action is in scope).
+                // (so window.State.do_action is in scope).
                 installDirtyHook();
                 vscode.postMessage({ type: 'webviewReady' });
             },

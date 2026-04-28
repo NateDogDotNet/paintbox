@@ -324,4 +324,50 @@ Bundle `vendor/minipaint/dist/bundle.js` SHA-256 unchanged
 
 ---
 
+**2026-04-28 — Phase 6.5 init path: use upstream `window.FileOpen` / `window.FileSave` / `window.State` globals**
+
+Burn-in of v0.0.2 surfaced that the shim's `waitForMiniPaint` poll never
+resolved: it was reading `window.app.File_open.file_open_data_url_handler`,
+but miniPaint v4.14.3's compiled bundle never sets `window.app` (the upstream
+`app` singleton is module-private and webpack minifies it to `v.A`). What
+the bundle DOES expose, deliberately, is three module classes on window:
+`window.FileOpen`, `window.FileSave`, `window.State`. The fix replaces the
+`getApp()` accessor + `MiniPaintApp` interface with three smaller accessors
+(`getFileOpen` / `getFileSave` / `getState`) and three smaller interfaces;
+all live-code references to `app.X` are gone. Rejected alternative:
+text-replacing `dist/bundle.js` to inject `window.app=v.A;` near the
+existing assignments. Rejected because it adds a second fragile patch
+surface, and the minified `v.A` token is not stable across upstream bumps —
+purely positional, no semantic anchor. Upstream already exposes the
+window globals as a public API; we use the entry point that's already
+there. Test 3c was masking the failure (4s wait then assert "no error
+toast" — the shim's 10s timeout fired AFTER the test had already
+resolved); Phase 6.5 tightens it to a Promise.race over three signals
+(`__pbTestOnReady` callback fires success, mocked `showErrorMessage`
+fires failure, 12s timeout fires "did not signal ready") backed by a new
+`PaintboxEditorProvider.__pbTestOnReady` test seam. New regression Test 3d
+loads the compiled shim into a `vm` sandbox without `window.FileOpen` /
+`FileSave` / `State` and asserts that `loadError` posts with the
+diagnostic dump (hasFileOpen/hasFileSave/hasState/hasFileOpenHandler) AND
+that no `webviewReady` posts — so if upstream stops exposing these
+globals on a future bump, the test fails fast at CI time rather than at
+burn-in. v0.0.2 diagnostic instrumentation (boot-error capture + verbose
+timeout dump) preserved; the dump's surface fields swapped from `appKeys`
+to the four `has*` flags. Bundle SHA-256 unchanged
+(`d084e26…83356`); `patchMinipaintBundle.ts` patch surface stays at 8
+sites. Test count 27 → 28. Bumped to v0.0.3.
+
+Two minor adjacent changes folded into the same commit, disclosed
+explicitly per Phase 6.5 reviewer ask: (1) `editorProvider.ts`'s
+`case 'loadError':` body was rewrapped — the user-facing toast now uses
+`path.basename(document.uri.fsPath)` instead of the full URI string
+(toasts truncate long URIs unreadably), and an Extension Host
+`console.error('[paintbox] loadError:', …)` log was added so the full
+diagnostic JSON survives toast truncation. (2) `.gitignore` gained a
+`temp/` entry to exclude a workspace-local burn-in scratch directory
+(non-build output; never shipped in VSIX since `.vscodeignore` is
+allow-list-style for `out/` + `vendor/`).
+
+---
+
 *(Add new entries at the bottom, newest last.)*

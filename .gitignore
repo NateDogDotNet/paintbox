@@ -5,3 +5,4 @@ out/
 .vscode/settings.json
 .orchestrator/
 .playwright-mcp/
+temp/
