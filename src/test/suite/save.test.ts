@@ -607,15 +607,250 @@ suite('Paintbox Phase 5 — Save (host writes bytes to disk)', () => {
         }
     });
 
-    // ---------- Test 5f — saveCustomDocumentAs cross-format rejection -----
+});
 
-    test('5f — saveCustomDocumentAs rejects cross-format with Phase-6 deferral', async function () {
-        this.timeout(10_000);
-        const h = await makeHarness(FIXTURE_1x1_PNG, 'crossfmt.png');
+// ---------- Phase 6 tests (cross-format Save As + lossy warning UX) -------
+
+/**
+ * Phase 6 tests (see .orchestrator/phase6-design.md §7 + orchestrator override).
+ *
+ *   6a (MANDATORY) — Cross-format Save As round-trip with real disk write.
+ *                    Stub showWarningMessage → 'Save Anyway'; assert JPEG magic
+ *                    bytes on disk; assert source PNG unchanged (SHA-256).
+ *   6b — Lossy-warning Cancel aborts the save; destination must NOT exist.
+ *   6c — Same-format Save As still works AND does NOT call showWarningMessage.
+ *   6d — JSON Save As throws Gate 1 unsupported-extension error.
+ *   6e — GIF cross-format Save As throws BEFORE the warning fires (override).
+ *
+ * Phase 5's Test 5f was deleted; tests 6a + 6c together replace its coverage.
+ */
+
+/**
+ * Monkey-patch helper for `vscode.window.showWarningMessage`. Tests use
+ * `try { … } finally { stub.restore(); }` to guarantee restoration even on
+ * assertion failure. No Sinon dependency.
+ */
+function installWarnStub(response: 'Save Anyway' | undefined) {
+    const original = vscode.window.showWarningMessage;
+    let callCount = 0;
+    let lastMessage = '';
+    (vscode.window as unknown as { showWarningMessage: (...args: unknown[]) => Thenable<string | undefined> })
+        .showWarningMessage = (...args: unknown[]) => {
+            callCount++;
+            lastMessage = String(args[0] || '');
+            return Promise.resolve(response);
+        };
+    return {
+        get callCount() { return callCount; },
+        get lastMessage() { return lastMessage; },
+        restore() {
+            (vscode.window as unknown as { showWarningMessage: typeof original }).showWarningMessage = original;
+        },
+    };
+}
+
+suite('Paintbox Phase 6 — Save As + Format Conversion', () => {
+    interface PostedMessage { type: string; [k: string]: unknown }
+
+    interface Harness {
+        provider: {
+            openCustomDocument: (
+                uri: vscode.Uri,
+                openCtx: vscode.CustomDocumentOpenContext,
+                tok: vscode.CancellationToken
+            ) => Promise<unknown>;
+            resolveCustomEditor: (
+                doc: unknown,
+                panel: vscode.WebviewPanel,
+                tok: vscode.CancellationToken
+            ) => Promise<void>;
+            saveCustomDocument: (doc: unknown, tok: vscode.CancellationToken) => Promise<void>;
+            saveCustomDocumentAs: (
+                doc: unknown,
+                dest: vscode.Uri,
+                tok: vscode.CancellationToken
+            ) => Promise<void>;
+        };
+        document: { uri: vscode.Uri; mime: string };
+        messageHandler: (m: PostedMessage) => void | Promise<void>;
+        posted: PostedMessage[];
+        cleanup: () => Promise<void>;
+        interceptNextRequestSave: (cb: (requestId: string) => void) => void;
+    }
+
+    async function makeHarness(fixturePath: string, fixtureBaseName: string): Promise<Harness> {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const providerModule = require('../../editorProvider');
+        const Provider = providerModule.PaintboxEditorProvider;
+
+        const ext = vscode.extensions.getExtension('NateDogDotNet.paintbox');
+        await ext!.activate();
+
+        const extensionUri = vscode.Uri.file(REPO_ROOT);
+        const fakeContext = {
+            extensionUri,
+            extensionPath: REPO_ROOT,
+            subscriptions: [] as vscode.Disposable[],
+        } as unknown as vscode.ExtensionContext;
+        const provider = new Provider(fakeContext);
+
+        const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'paintbox-6-'));
+        const tmpFile = path.join(tmpDir, fixtureBaseName);
+        await fs.promises.copyFile(fixturePath, tmpFile);
+        const tmpUri = vscode.Uri.file(tmpFile);
+
+        const document = await provider.openCustomDocument(
+            tmpUri,
+            { backupId: undefined } as unknown as vscode.CustomDocumentOpenContext,
+            new vscode.CancellationTokenSource().token
+        );
+
+        const posted: PostedMessage[] = [];
+        let messageHandler: ((msg: PostedMessage) => void | Promise<void>) | undefined;
+        const requestSaveInterceptors: Array<(requestId: string) => void> = [];
+
+        const fakeWebview = {
+            cspSource: 'vscode-webview://fake',
+            options: {} as vscode.WebviewOptions,
+            html: '',
+            asWebviewUri: (uri: vscode.Uri) =>
+                vscode.Uri.parse(`https://fake-webview.test${uri.path}`),
+            onDidReceiveMessage: (cb: (msg: PostedMessage) => void | Promise<void>) => {
+                messageHandler = cb;
+                return new vscode.Disposable(() => { messageHandler = undefined; });
+            },
+            postMessage: async (msg: PostedMessage) => {
+                posted.push(msg);
+                if (msg.type === 'requestSave' && requestSaveInterceptors.length > 0) {
+                    const cb = requestSaveInterceptors.shift()!;
+                    setTimeout(() => cb(String(msg.requestId)), 0);
+                }
+                return true;
+            },
+        };
+        const fakePanel = {
+            webview: fakeWebview,
+            onDidDispose: (_cb: () => void) => new vscode.Disposable(() => undefined),
+        } as unknown as vscode.WebviewPanel;
+
+        await provider.resolveCustomEditor(
+            document,
+            fakePanel,
+            new vscode.CancellationTokenSource().token
+        );
+        assert.ok(messageHandler, 'host did not register onDidReceiveMessage');
+
+        return {
+            provider: provider as Harness['provider'],
+            document: document as Harness['document'],
+            messageHandler: messageHandler!,
+            posted,
+            cleanup: async () => {
+                try { await fs.promises.rm(tmpDir, { recursive: true, force: true }); }
+                catch { /* best-effort */ }
+            },
+            interceptNextRequestSave: (cb) => { requestSaveInterceptors.push(cb); },
+        };
+    }
+
+    function sha256(buf: Uint8Array | Buffer): string {
+        return crypto.createHash('sha256').update(buf).digest('hex');
+    }
+
+    // ---------- Test 6a — MANDATORY: cross-format Save As round-trip ---------
+
+    test('6a — saveCustomDocumentAs (PNG → JPG) writes JPEG to disk; source PNG unchanged', async function () {
+        this.timeout(15_000);
+        const h = await makeHarness(FIXTURE_2x2_PNG, 'src.png');
+        const stub = installWarnStub('Save Anyway');
         try {
-            // Different extension from the document URI.
+            // Pre: capture source SHA-256 to prove non-mutation post-save.
+            const sourceBytesBefore = await fs.promises.readFile(h.document.uri.fsPath);
+            const sourceShaBefore = sha256(sourceBytesBefore);
+
+            // Destination .jpg in the same tmp dir.
             const tmpDir = path.dirname(h.document.uri.fsPath);
-            const destUri = vscode.Uri.file(path.join(tmpDir, 'crossfmt.jpg'));
+            const destPath = path.join(tmpDir, 'out.jpg');
+            const destUri = vscode.Uri.file(destPath);
+
+            // Synthetic JPEG bytes the "webview" will return. JFIF magic
+            // (0xff 0xd8 0xff 0xe0) + minimal payload — content does not need
+            // to be a fully decodable JPEG; we only assert magic bytes + that
+            // the bytes-on-disk match what the webview emitted.
+            const fakeJpegBytes = new Uint8Array([
+                0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00,
+                0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+                // ... arbitrary trailing payload ...
+                0xff, 0xd9, // EOI marker
+            ]);
+
+            h.interceptNextRequestSave((requestId) => {
+                Promise.resolve(h.messageHandler({
+                    type: 'saveResult',
+                    requestId,
+                    bytes: Array.from(fakeJpegBytes),
+                    format: 'JPG',
+                    filename: 'out.jpg',
+                    mime: 'image/jpeg',
+                })).catch(() => undefined);
+            });
+
+            await h.provider.saveCustomDocumentAs(
+                h.document,
+                destUri,
+                new vscode.CancellationTokenSource().token
+            );
+
+            // ── load-bearing assertion (Test 6a) ──
+            // 1. Destination file exists with JPEG magic bytes.
+            const onDisk = await fs.promises.readFile(destPath);
+            assert.ok(onDisk.length >= 4, 'destination file must have at least 4 bytes');
+            const isJfif = onDisk[0] === 0xff && onDisk[1] === 0xd8 &&
+                           onDisk[2] === 0xff && onDisk[3] === 0xe0;
+            const isExif = onDisk[0] === 0xff && onDisk[1] === 0xd8 &&
+                           onDisk[2] === 0xff && onDisk[3] === 0xe1;
+            assert.ok(
+                isJfif || isExif,
+                `destination must start with JPEG magic (ff d8 ff e0 OR ff d8 ff e1); ` +
+                `got: ${onDisk[0].toString(16)} ${onDisk[1].toString(16)} ${onDisk[2].toString(16)} ${onDisk[3].toString(16)}`
+            );
+
+            // 2. On-disk bytes are NOT byte-identical to the source PNG.
+            assert.notStrictEqual(
+                sha256(onDisk),
+                sourceShaBefore,
+                'on-disk JPEG must differ from source PNG'
+            );
+
+            // 3. Source PNG file at document.uri is unchanged (SHA-256 pre vs post).
+            const sourceBytesAfter = await fs.promises.readFile(h.document.uri.fsPath);
+            assert.strictEqual(
+                sha256(sourceBytesAfter),
+                sourceShaBefore,
+                'source PNG SHA-256 must be unchanged after Save As'
+            );
+
+            // 4. Warning was shown exactly once (cross-format triggers it).
+            assert.strictEqual(stub.callCount, 1,
+                `expected exactly 1 showWarningMessage call; saw ${stub.callCount}`);
+            assert.match(stub.lastMessage, /\.png/, 'warning should mention .png');
+            assert.match(stub.lastMessage, /\.jpg/, 'warning should mention .jpg');
+        } finally {
+            stub.restore();
+            await h.cleanup();
+        }
+    });
+
+    // ---------- Test 6b — Cancel aborts the save ----------------------------
+
+    test('6b — lossy-warning Cancel aborts saveCustomDocumentAs (no dest file)', async function () {
+        this.timeout(10_000);
+        const h = await makeHarness(FIXTURE_2x2_PNG, 'src.png');
+        const stub = installWarnStub(undefined); // 'Cancel' / dismiss
+        try {
+            const tmpDir = path.dirname(h.document.uri.fsPath);
+            const destPath = path.join(tmpDir, 'cancelled.jpg');
+            const destUri = vscode.Uri.file(destPath);
 
             let rejection: Error | null = null;
             try {
@@ -625,13 +860,174 @@ suite('Paintbox Phase 5 — Save (host writes bytes to disk)', () => {
                     new vscode.CancellationTokenSource().token
                 );
             } catch (err) { rejection = err as Error; }
-            assert.ok(rejection, 'saveCustomDocumentAs should reject cross-format');
+            assert.ok(rejection, 'saveCustomDocumentAs should reject when user cancels');
             assert.match(
                 rejection!.message,
-                /Save As across formats is implemented in Phase 6/,
-                `expected Phase 6 deferral message; got: ${rejection!.message}`
+                /Save As cancelled/,
+                `expected cancellation message; got: ${rejection!.message}`
+            );
+
+            // Destination must not exist.
+            let destExists = true;
+            try { await fs.promises.stat(destPath); } catch { destExists = false; }
+            assert.strictEqual(destExists, false,
+                'destination file must NOT exist when user cancelled the warning');
+
+            // Warning was shown exactly once with both extensions.
+            assert.strictEqual(stub.callCount, 1,
+                `expected exactly 1 showWarningMessage call; saw ${stub.callCount}`);
+            assert.match(stub.lastMessage, /\.png/, 'warning should mention .png');
+            assert.match(stub.lastMessage, /\.jpg/, 'warning should mention .jpg');
+        } finally {
+            stub.restore();
+            await h.cleanup();
+        }
+    });
+
+    // ---------- Test 6c — Same-format Save As skips the warning -------------
+
+    test('6c — same-format Save As succeeds without firing the warning', async function () {
+        this.timeout(10_000);
+        const h = await makeHarness(FIXTURE_2x2_PNG, 'src.png');
+        // Spy on showWarningMessage; if it fires, count goes up and we fail.
+        const stub = installWarnStub('Save Anyway');
+        try {
+            const tmpDir = path.dirname(h.document.uri.fsPath);
+            const destPath = path.join(tmpDir, 'copy.png');
+            const destUri = vscode.Uri.file(destPath);
+
+            const synthBytes = new Uint8Array([
+                0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+                // ... minimal junk payload, host doesn't decode ...
+                0x00, 0x00, 0x00, 0x00,
+            ]);
+
+            h.interceptNextRequestSave((requestId) => {
+                Promise.resolve(h.messageHandler({
+                    type: 'saveResult',
+                    requestId,
+                    bytes: Array.from(synthBytes),
+                    format: 'PNG',
+                    filename: 'copy.png',
+                    mime: 'image/png',
+                })).catch(() => undefined);
+            });
+
+            await h.provider.saveCustomDocumentAs(
+                h.document,
+                destUri,
+                new vscode.CancellationTokenSource().token
+            );
+
+            // Bytes at the new path begin with PNG magic.
+            const onDisk = await fs.promises.readFile(destPath);
+            assert.ok(
+                onDisk[0] === 0x89 && onDisk[1] === 0x50 &&
+                onDisk[2] === 0x4e && onDisk[3] === 0x47,
+                `destination must start with PNG magic; got: ${onDisk[0].toString(16)} ${onDisk[1].toString(16)} ${onDisk[2].toString(16)} ${onDisk[3].toString(16)}`
+            );
+
+            // Warning was NOT shown (same-format path).
+            assert.strictEqual(stub.callCount, 0,
+                `same-format Save As must NOT fire the warning; got ${stub.callCount} calls`);
+        } finally {
+            stub.restore();
+            await h.cleanup();
+        }
+    });
+
+    // ---------- Test 6d — JSON Save As throws Gate 1 ------------------------
+
+    test('6d — Save As to .json throws unsupported-extension error', async function () {
+        this.timeout(10_000);
+        const h = await makeHarness(FIXTURE_2x2_PNG, 'src.png');
+        // Stub Save Anyway so the warning resolves; we want to test that
+        // Gate 1 rejects unsupported .json AFTER the warning click-through.
+        const stub = installWarnStub('Save Anyway');
+        try {
+            const sourceShaBefore = sha256(await fs.promises.readFile(h.document.uri.fsPath));
+
+            const tmpDir = path.dirname(h.document.uri.fsPath);
+            const destPath = path.join(tmpDir, 'layers.json');
+            const destUri = vscode.Uri.file(destPath);
+
+            let rejection: Error | null = null;
+            try {
+                await h.provider.saveCustomDocumentAs(
+                    h.document,
+                    destUri,
+                    new vscode.CancellationTokenSource().token
+                );
+            } catch (err) { rejection = err as Error; }
+            assert.ok(rejection, 'saveCustomDocumentAs should reject .json destination');
+            assert.match(
+                rejection!.message,
+                /extension "\.json" is not supported/,
+                `expected Gate 1 unsupported-extension error; got: ${rejection!.message}`
+            );
+
+            // Source PNG is unchanged.
+            const sourceShaAfter = sha256(await fs.promises.readFile(h.document.uri.fsPath));
+            assert.strictEqual(
+                sourceShaBefore, sourceShaAfter,
+                'source PNG must be unchanged after rejected JSON Save As'
             );
         } finally {
+            stub.restore();
+            await h.cleanup();
+        }
+    });
+
+    // ---------- Test 6e — GIF cross-format throws BEFORE warning (override) -
+
+    test('6e — GIF cross-format Save As throws fast (does NOT show the warning)', async function () {
+        this.timeout(10_000);
+        const h = await makeHarness(FIXTURE_2x2_PNG, 'src.png');
+        // Per orchestrator override: GIF check fires BEFORE the lossy warning.
+        // We do NOT install a Save-Anyway stub; if the warning DID fire, the
+        // unstubbed showWarningMessage in test mode would either hang or
+        // resolve undefined, neither of which we want to depend on.
+        // Use a stub that ASSERTS-FALSE if called: any call indicates the
+        // override was implemented incorrectly.
+        let warnCalled = false;
+        const original = vscode.window.showWarningMessage;
+        (vscode.window as unknown as { showWarningMessage: (...a: unknown[]) => Thenable<string | undefined> })
+            .showWarningMessage = (..._args: unknown[]) => {
+                warnCalled = true;
+                return Promise.resolve(undefined);
+            };
+        try {
+            const tmpDir = path.dirname(h.document.uri.fsPath);
+            const destPath = path.join(tmpDir, 'out.gif');
+            const destUri = vscode.Uri.file(destPath);
+
+            let rejection: Error | null = null;
+            try {
+                await h.provider.saveCustomDocumentAs(
+                    h.document,
+                    destUri,
+                    new vscode.CancellationTokenSource().token
+                );
+            } catch (err) { rejection = err as Error; }
+            assert.ok(rejection, 'GIF cross-format Save As must reject');
+            assert.match(
+                rejection!.message,
+                /Save As to GIF across formats is not supported/,
+                `expected GIF-deferral error; got: ${rejection!.message}`
+            );
+
+            // Override assertion: warning must NOT have been shown.
+            assert.strictEqual(warnCalled, false,
+                'GIF check must fire BEFORE the lossy-conversion warning (orchestrator override)');
+
+            // Destination must not exist.
+            let destExists = true;
+            try { await fs.promises.stat(destPath); } catch { destExists = false; }
+            assert.strictEqual(destExists, false,
+                'GIF destination must NOT exist after rejection');
+        } finally {
+            (vscode.window as unknown as { showWarningMessage: typeof original })
+                .showWarningMessage = original;
             await h.cleanup();
         }
     });

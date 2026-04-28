@@ -254,4 +254,74 @@ Phase 5 changes are host + shim only.
 
 ---
 
+**2026-04-27 — Phase 6 Save As + format conversion: lift same-format guard, modal lossy warning, GIF/JSON cross-format throws**
+
+Phase 6 enables cross-format Save As atop Phase 5's host-initiated
+`requestSave` round-trip. `_writeViaWebview` already derives format from
+`destination.fsPath` (Phase 5 §8 set this up specifically for cross-format
+Save As), so the implementation is one method body's worth of UX gating
+around the existing pipeline.
+
+Sub-decisions (8 design defaults + 1 orchestrator override):
+
+1. **Lossy-conversion warning UX** — modal `vscode.window.showWarningMessage`
+   with single "Save Anyway" button (VS Code adds an automatic "Cancel").
+   Fires only on cross-format `saveCustomDocumentAs`; same-format and
+   `saveCustomDocument` skip it. Cancel/dismiss → strict-equality returns
+   false → throws `'Paintbox: Save As cancelled.'`. Helper:
+   `_confirmLossyConversion(sourceExt, destExt): Promise<boolean>`.
+
+2. **JSON layered format** — skip in v1 entirely. Existing Gate 1 in
+   `_writeViaWebview` already throws on `.json`. No `FORMAT_BY_EXT` entry,
+   no new `package.json` selector. Asymmetric save-only would let users
+   write files they couldn't reopen; rejected. Re-evaluate Phase 7+.
+
+3. **GIF cross-format** — throws with "Save As to GIF across formats is not
+   supported in v1." Same-format `.gif` → `.gif` (Ctrl-S round-trip) still
+   works through `saveCustomDocument`. Justification: miniPaint's GIF branch
+   (`save.js:619-624`) unconditionally iterates `config.layers` to build
+   animation frames AND `gif.worker.js` is loaded via a relative
+   `workerScript` path that's CSP-hostile under the webview sandbox. Two
+   strikes, both upstream-coupled.
+
+4. **Quality picker** — keep hardcoded `quality: 90` in `shim.ts`. Picker
+   UI deferred to Phase 7. Phase 6 acceptance criterion does not require
+   quality control; YAGNI.
+
+5. **`.vscodeignore` Phase 4/5 reviewer bugs** — deferred to Phase 7
+   packaging cleanup. Phase 6 added zero packaged files.
+
+6. **Test 6f optional defensive test** — dropped. Warning logic is scoped
+   to `saveCustomDocumentAs`; a regression that moved it elsewhere would
+   also break other tests.
+
+7. **`__pbTestGetMeta` rename to `peekMeta`** — deferred to Phase 7. Phase
+   6 didn't touch `SaveCorrelator`.
+
+8. **Reviewer-flagged race risk (parallel test runs)** — `installWarnStub`
+   monkey-patches `vscode.window.showWarningMessage`; multiple Phase 6
+   tests use it. Current Mocha runner is sequential; switch to per-stub
+   Sinon if `--parallel` is added later.
+
+**Orchestrator override (user-approved):** GIF cross-format throws BEFORE
+the lossy-conversion warning, not after. The design's §1 diff sketch put
+GIF after the warning; that means PNG → GIF would prompt the user with a
+lossy warning, the user would click "Save Anyway", and THEN get "GIF not
+supported" — bad UX. Concrete sequence in `saveCustomDocumentAs`: (1) compute
+`sourceExt`/`destExt`/`sameFormat`; (2) GIF check throws fast; (3) lossy
+warning on remaining cross-format paths; (4) `_writeViaWebview`. Test 6e
+asserts `showWarningMessage` was NOT called when the GIF guard fires —
+proving the override.
+
+Test counts: Phase 5 had 23 passing; deleted Test 5f (Phase 6 deferral
+assertion no longer accurate); added Tests 6a (mandatory cross-format JPEG
+round-trip with source-PNG SHA-256 stability), 6b (Cancel aborts), 6c
+(same-format skips warning), 6d (JSON Gate 1 unsupported-extension), 6e
+(GIF throws before warning). Final: 27 passing.
+
+Bundle `vendor/minipaint/dist/bundle.js` SHA-256 unchanged
+(`d084e26…83356`). Phase 6 changes are host + tests only.
+
+---
+
 *(Add new entries at the bottom, newest last.)*

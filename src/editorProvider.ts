@@ -334,21 +334,65 @@ export class PaintboxEditorProvider
         destination: vscode.Uri,
         cancellation: vscode.CancellationToken
     ): Promise<void> {
-        // Phase 5 default 2: same-format Save As only; cross-format is
-        // Phase 6 (alpha-flattening warning, quality picker, etc.).
+        // Phase 6 §1: cross-format Save As is now supported. The same
+        // sourceExt/destExt/sameFormat calc serves both the GIF guard and
+        // the lossy-conversion warning below.
         const sourceExt = path.extname(document.uri.fsPath).toLowerCase();
         const destExt = path.extname(destination.fsPath).toLowerCase();
         const sameFormat = (sourceExt === destExt) ||
             (sourceExt === '.jpg' && destExt === '.jpeg') ||
             (sourceExt === '.jpeg' && destExt === '.jpg');
-        if (!sameFormat) {
+
+        // Phase 6 §4 (orchestrator override): hard failures FIRST. GIF
+        // cross-format is unsupported because miniPaint's GIF branch
+        // unconditionally animates from layers and the gif.worker.js path
+        // is CSP-hostile under the webview sandbox. Failing fast — BEFORE
+        // the lossy warning — avoids prompting the user for an outcome
+        // we'd then refuse to deliver.
+        if (destExt === '.gif' && !sameFormat) {
             throw new Error(
-                'Paintbox: Save As across formats is implemented in Phase 6 ' +
-                `(${sourceExt} → ${destExt}). For now, save to the original format ` +
-                'or use a third-party converter.'
+                'Paintbox: Save As to GIF across formats is not supported in v1. ' +
+                "miniPaint's GIF export builds an animation from layers; " +
+                'cross-format flattening to a static GIF requires upstream changes. ' +
+                'Use PNG or WEBP instead.'
             );
         }
+
+        // Phase 6 §2: lossy-conversion warning fires only on supported
+        // cross-format paths. User-cancelled → throw to abort cleanly.
+        if (!sameFormat) {
+            const proceed = await this._confirmLossyConversion(sourceExt, destExt);
+            if (!proceed) {
+                throw new Error('Paintbox: Save As cancelled.');
+            }
+        }
+
         return this._writeViaWebview(document, destination, cancellation);
+    }
+
+    /**
+     * Phase 6 §2: ask the user before a cross-format Save As that may lose
+     * information (alpha → white fill, JPEG re-encode, etc.).
+     *
+     * Modal `showWarningMessage` with a single positive button. VS Code
+     * renders an automatic "Cancel" button alongside; both Cancel and
+     * dismiss (Esc / X) resolve to `undefined`, so the strict-equality
+     * check correctly returns `false` for any non-affirmative outcome.
+     */
+    private async _confirmLossyConversion(
+        sourceExt: string,
+        destExt: string
+    ): Promise<boolean> {
+        const message =
+            `Paintbox: Save As will convert ${sourceExt} to ${destExt}. ` +
+            'This may flatten transparency, reduce image quality, or lose other ' +
+            'format-specific data. Continue?';
+        const choice = await vscode.window.showWarningMessage(
+            message,
+            { modal: true },
+            'Save Anyway'
+        );
+        return choice === 'Save Anyway';
     }
 
     async revertCustomDocument(
