@@ -1,26 +1,35 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { buildWebviewHtml } from './webviewHtml';
+import { SaveCorrelator } from './saveCorrelator';
 
 /**
  * ImageDocument — the in-memory model for an open image file.
  *
  * Phase 3 stores no bytes here: the host re-reads from disk on every load
  * (initial open AND retry) so the document remains a thin URI wrapper. Phase 5
- * will introduce dirty tracking and pending save state.
+ * adds an optional `backupUri` for hot-exit recovery (CustomDocumentBackup
+ * round-trip; see Phase 5 design §7).
  */
 class ImageDocument implements vscode.CustomDocument {
     readonly uri: vscode.Uri;
     /** Derived from extension on open; informational for the load message. */
     readonly mime: string;
+    /**
+     * Hot-exit backup URI. When non-null, the load path reads from here
+     * instead of `uri`. Set by `openCustomDocument` from `openContext.backupId`.
+     */
+    backupUri: vscode.Uri | undefined;
 
     constructor(uri: vscode.Uri, mime: string) {
         this.uri = uri;
         this.mime = mime;
+        this.backupUri = undefined;
     }
 
     dispose(): void {
-        // No buffered state in Phase 3.
+        // No buffered state.
     }
 }
 
@@ -39,9 +48,41 @@ const MIME_BY_EXT: Record<string, string> = {
     '.bmp':  'image/bmp',
 };
 
+/**
+ * Phase 5 file extension → {format, mime} map. The format string is what
+ * miniPaint's `save_action` accepts (line 480 of vendor save.js splits on
+ * space, so `'PNG'` is sufficient). MIME is what we expect back on
+ * `saveResult.mime`; mismatch → Gate 2 reject (design §8).
+ *
+ * Lives next to MIME_BY_EXT but kept distinct: MIME_BY_EXT serves the OPEN
+ * path (load message) where we don't need miniPaint's format key; FORMAT_BY_EXT
+ * serves the SAVE path (requestSave message).
+ */
+const FORMAT_BY_EXT: Record<string, { format: 'PNG'|'JPG'|'WEBP'|'BMP'|'GIF'; mime: string }> = {
+    '.png':  { format: 'PNG',  mime: 'image/png'  },
+    '.jpg':  { format: 'JPG',  mime: 'image/jpeg' },
+    '.jpeg': { format: 'JPG',  mime: 'image/jpeg' },
+    '.webp': { format: 'WEBP', mime: 'image/webp' },
+    '.bmp':  { format: 'BMP',  mime: 'image/bmp'  },
+    '.gif':  { format: 'GIF',  mime: 'image/gif'  },
+};
+
+const SAVE_TIMEOUT_MS = 30_000;
+
 function deriveMime(uri: vscode.Uri): string {
     const ext = path.extname(uri.fsPath).toLowerCase();
     return MIME_BY_EXT[ext] || 'application/octet-stream';
+}
+
+/**
+ * Per-pending-save metadata stashed inside the SaveCorrelator. Used by
+ * cancelByPredicate to filter pending saves when a webview is disposed
+ * (only reject saves for THAT URI).
+ */
+interface PendingMeta {
+    uri: vscode.Uri;
+    expectedMime: string;
+    expectedFormat: 'PNG' | 'JPG' | 'WEBP' | 'BMP' | 'GIF';
 }
 
 /**
@@ -49,24 +90,41 @@ function deriveMime(uri: vscode.Uri): string {
  * webview and bridges the open/edit/save round-trip to the server filesystem.
  *
  * Architecture (see docs/architecture.md for Mermaid sequence diagram):
- *   1. openCustomDocument   — derive MIME, return ImageDocument (bytes are
- *                             read on demand by the load round-trip)
+ *   1. openCustomDocument   — derive MIME, return ImageDocument; honor
+ *                             openContext.backupId for hot-exit recovery.
  *   2. resolveCustomEditor  — set localResourceRoots, set webview.html via
  *                             buildWebviewHtml, wire postMessage handler
- *   3. (user edits in miniPaint)
- *   4. saveCustomDocument   — Phase 5
+ *   3. (user edits in miniPaint; shim posts {type:'dirty'} once per epoch)
+ *   4. saveCustomDocument   — host posts {type:'requestSave', requestId, …};
+ *                             webview replies {type:'saveResult', requestId,
+ *                             bytes, mime, …}; host writes bytes to disk;
+ *                             posts {type:'saved', requestId} back to webview
+ *                             so shim resets its dirty epoch.
  *
  * Phase map:
  *   Phase 2 — stub registration (done)
- *   Phase 3 — open file: read bytes → webview (this commit)
- *   Phase 4 — patch miniPaint File_save to postMessage result back to host
- *   Phase 5 — saveCustomDocument / saveCustomDocumentAs writeFile
- *   Phase 6 — format conversion (Save As)
+ *   Phase 3 — open file: read bytes → webview (done)
+ *   Phase 4 — patch miniPaint File_save to postMessage result back to host (done)
+ *   Phase 5 — saveCustomDocument / saveCustomDocumentAs / revert / backup
+ *             (this commit)
+ *   Phase 6 — cross-format Save As + format conversion
  */
 export class PaintboxEditorProvider
     implements vscode.CustomEditorProvider<ImageDocument>
 {
     private static readonly VIEW_TYPE = 'paintbox.imageEditor';
+
+    /**
+     * Test seam (Phase 5 §10): tests reach the most-recently-instantiated
+     * provider via this static accessor. The provider is a singleton via VS
+     * Code's `registerCustomEditorProvider`, so this is well-defined for
+     * production. Tests that `new` a provider directly also publish to here
+     * so `__pbTestGetActive()` returns their instance.
+     */
+    private static _activeInstance: PaintboxEditorProvider | undefined;
+    static __pbTestGetActive(): PaintboxEditorProvider | undefined {
+        return PaintboxEditorProvider._activeInstance;
+    }
 
     static register(context: vscode.ExtensionContext): vscode.Disposable {
         return vscode.window.registerCustomEditorProvider(
@@ -86,7 +144,21 @@ export class PaintboxEditorProvider
         new vscode.EventEmitter<vscode.CustomDocumentEditEvent<ImageDocument>>();
     readonly onDidChangeCustomDocument = this._onDidChangeCustomDocument.event;
 
-    constructor(private readonly _context: vscode.ExtensionContext) {}
+    /** Phase 5: per-document webview panel registry. Populated in
+     * `resolveCustomEditor`, cleared in `onDidDispose`. */
+    private readonly _webviewByUri = new Map<string, vscode.WebviewPanel>();
+
+    /** Phase 5: dirty-tracking gate. Once-per-save epoch; `case 'dirty'`
+     * fires `_onDidChangeCustomDocument` exactly once until the next save
+     * clears the entry. */
+    private readonly _dirtyEpochByUri = new Map<string, boolean>();
+
+    /** Phase 5: requestId-keyed pending-save correlator. */
+    private readonly _correlator = new SaveCorrelator<PendingMeta>();
+
+    constructor(private readonly _context: vscode.ExtensionContext) {
+        PaintboxEditorProvider._activeInstance = this;
+    }
 
     // -------------------------------------------------------------------------
     // CustomEditorProvider interface
@@ -94,14 +166,25 @@ export class PaintboxEditorProvider
 
     async openCustomDocument(
         uri: vscode.Uri,
-        _openContext: vscode.CustomDocumentOpenContext,
+        openContext: vscode.CustomDocumentOpenContext,
         _token: vscode.CancellationToken
     ): Promise<ImageDocument> {
-        // Phase 3: bytes are NOT cached on the document. Each load posts a
-        // fresh read, so retry is consistent with disk state and we don't
-        // burn memory on every open. Phase 5 will revisit if the round-trip
-        // demands a buffer.
-        return new ImageDocument(uri, deriveMime(uri));
+        const doc = new ImageDocument(uri, deriveMime(uri));
+        // Phase 5 §7: honor hot-exit backup. When VS Code restarts after a
+        // crash, openContext.backupId is the URI of the backup file we wrote
+        // in `backupCustomDocument`. Read from THAT file instead of the
+        // possibly-stale on-disk URI.
+        if (openContext.backupId) {
+            try {
+                doc.backupUri = vscode.Uri.parse(openContext.backupId);
+            } catch {
+                // Defensive: if the backupId isn't a parseable URI, fall back
+                // to the document URI (Phase 7 may revisit on Windows path
+                // edge cases).
+                doc.backupUri = undefined;
+            }
+        }
+        return doc;
     }
 
     async resolveCustomEditor(
@@ -127,112 +210,335 @@ export class PaintboxEditorProvider
             { filename }
         );
 
-        const postLoad = async (): Promise<void> => {
-            try {
-                const bytes = await vscode.workspace.fs.readFile(document.uri);
-                const dataUrl =
-                    `data:${document.mime};base64,` +
-                    Buffer.from(bytes).toString('base64');
-                await webviewPanel.webview.postMessage({
-                    type: 'load',
-                    dataUrl,
-                    filename,
-                    mime: document.mime,
-                });
-            } catch (err: unknown) {
-                const message = err instanceof Error ? err.message : String(err);
-                // Surface the full URI in the error path per Phase 3 design §9 Q2.
-                vscode.window.showErrorMessage(
-                    `Paintbox: failed to read ${document.uri.toString()}: ${message}`
-                );
-            }
-        };
+        // Register the panel so saveCustomDocument can find it by URI.
+        const uriKey = document.uri.toString();
+        this._webviewByUri.set(uriKey, webviewPanel);
 
         const messageSub = webviewPanel.webview.onDidReceiveMessage(async (msg) => {
             if (!msg || typeof msg !== 'object') return;
             switch (msg.type) {
                 case 'webviewReady':
-                    await postLoad();
+                    await this._postLoadToWebview(webviewPanel, document);
                     return;
                 case 'retry':
-                    await postLoad();
+                    await this._postLoadToWebview(webviewPanel, document);
                     return;
                 case 'ready':
-                    // Phase 3: nothing to do; Phase 5 may resolve a pending Promise.
                     return;
                 case 'loadError':
                     vscode.window.showErrorMessage(
                         `Paintbox: ${String(msg.error || 'unknown error')} (${document.uri.toString()})`
                     );
                     return;
-                case 'saveResult': {
-                    // Phase 4 — log only. Phase 5 wires this to
-                    // vscode.workspace.fs.writeFile via a pending-save promise.
-                    // First-8-bytes hex helps a developer eyeball-confirm a
-                    // PNG (89 50 4e 47 0d 0a 1a 0a) or JPEG (ff d8 ff e0)
-                    // without firing up a hex editor.
-                    const bytes = Array.isArray(msg.bytes) ? (msg.bytes as number[]) : [];
-                    const first8 = bytes.length > 0
-                        ? bytes.slice(0, 8).map((b) => (b & 0xff).toString(16).padStart(2, '0')).join(' ')
-                        : '(none)';
-                    console.log('[paintbox] saveResult received', {
-                        format: msg.format,
-                        filename: msg.filename,
-                        mime: msg.mime,
-                        bytes_length: bytes.length,
-                        first_8_bytes: first8,
+                case 'dirty': {
+                    // Phase 5 §1: shim's once-per-save gate guarantees at most
+                    // one dirty per epoch, but gate again here in case of
+                    // ordering races (defensive).
+                    const key = document.uri.toString();
+                    if (this._dirtyEpochByUri.get(key)) return;
+                    this._dirtyEpochByUri.set(key, true);
+                    this._onDidChangeCustomDocument.fire({
+                        document,
+                        label: 'Edit',
+                        // VS Code undo/redo bridging is a no-op (default 8).
+                        // miniPaint owns its in-canvas undo stack; bridging is
+                        // a Phase 6+ concern.
+                        undo: () => { console.debug('[paintbox] VS Code undo not bridged to miniPaint (Phase 6+)'); },
+                        redo: () => { console.debug('[paintbox] VS Code redo not bridged to miniPaint (Phase 6+)'); },
                     });
                     return;
                 }
-                case 'saveError':
-                    // Phase 4 — log only. Phase 5 may surface to the user.
-                    console.error('[paintbox] saveError received', {
-                        error: String(msg.error || 'unknown error'),
-                        filename: msg.filename,
-                    });
+                case 'saveResult': {
+                    const requestId = typeof msg.requestId === 'string' ? msg.requestId : '';
+                    if (!requestId) {
+                        // Default 4: user-initiated save (File menu inside
+                        // webview). Log and ignore — DO NOT write to disk.
+                        // Silently writing in response to a UI button click
+                        // is a trust violation; the user thinks "download"
+                        // not "overwrite the workspace file."
+                        // eslint-disable-next-line no-console
+                        console.log('[paintbox] saveResult without pending request — ignored', {
+                            requestId,
+                            format: String(msg.format || ''),
+                            filename: String(msg.filename || ''),
+                        });
+                        return;
+                    }
+                    // Format/MIME enforcement (Gate 2, design §8).
+                    const arrivedMime = String(msg.mime || '');
+                    // Read the meta BEFORE delivering — once handleSaveResult
+                    // fires, the entry is gone.
+                    const meta = this._correlator.__pbTestGetMeta(requestId);
+                    if (!meta) {
+                        // Late arrival after timeout/cancel; log and drop.
+                        // eslint-disable-next-line no-console
+                        console.log('[paintbox] saveResult for unknown requestId — ignored', { requestId });
+                        return;
+                    }
+                    if (arrivedMime !== meta.expectedMime) {
+                        this._correlator.cancel(requestId, new Error(
+                            `Paintbox: expected ${meta.expectedMime} but webview produced ${arrivedMime || '(unknown)'}. ` +
+                            'Save aborted to avoid writing the wrong format to disk.'
+                        ));
+                        return;
+                    }
+                    const bytesArr = Array.isArray(msg.bytes) ? (msg.bytes as number[]) : null;
+                    if (!bytesArr || bytesArr.length === 0) {
+                        this._correlator.cancel(requestId, new Error(
+                            'Paintbox: webview returned empty bytes; save aborted.'
+                        ));
+                        return;
+                    }
+                    this._correlator.handleSaveResult(requestId, new Uint8Array(bytesArr));
                     return;
+                }
+                case 'saveError': {
+                    const requestId = typeof msg.requestId === 'string' ? msg.requestId : '';
+                    const errStr = String(msg.error || 'unknown error');
+                    if (requestId) {
+                        const matched = this._correlator.handleSaveError(requestId, errStr);
+                        if (matched) return;
+                        // Default 4: log-only when no pending match.
+                        // eslint-disable-next-line no-console
+                        console.log('[paintbox] saveError without pending request — ignored', { requestId, error: errStr });
+                        return;
+                    }
+                    // No requestId — surface as a user-visible error.
+                    vscode.window.showErrorMessage(`Paintbox: save error — ${errStr}`);
+                    return;
+                }
             }
         });
 
         webviewPanel.onDidDispose(() => {
             messageSub.dispose();
+            // Reject any saves in flight for THIS URI.
+            this._correlator.cancelByPredicate(
+                (meta) => !!meta && meta.uri.toString() === uriKey,
+                new Error('Paintbox: editor closed before save completed.')
+            );
+            this._webviewByUri.delete(uriKey);
+            this._dirtyEpochByUri.delete(uriKey);
         });
     }
 
     async saveCustomDocument(
-        _document: ImageDocument,
-        _cancellation: vscode.CancellationToken
+        document: ImageDocument,
+        cancellation: vscode.CancellationToken
     ): Promise<void> {
-        // Phase 5: receive the latest bytes from the webview (via a pending
-        // promise set up in resolveCustomEditor) and write them to disk.
-        throw new Error('Save not yet implemented — see docs/integration-plan.md Phase 5');
+        return this._writeViaWebview(document, document.uri, cancellation);
     }
 
     async saveCustomDocumentAs(
-        _document: ImageDocument,
-        _destination: vscode.Uri,
-        _cancellation: vscode.CancellationToken
+        document: ImageDocument,
+        destination: vscode.Uri,
+        cancellation: vscode.CancellationToken
     ): Promise<void> {
-        // Phase 6: same as saveCustomDocument but writes to _destination.
-        throw new Error('Save As not yet implemented — see docs/integration-plan.md Phase 6');
+        // Phase 5 default 2: same-format Save As only; cross-format is
+        // Phase 6 (alpha-flattening warning, quality picker, etc.).
+        const sourceExt = path.extname(document.uri.fsPath).toLowerCase();
+        const destExt = path.extname(destination.fsPath).toLowerCase();
+        const sameFormat = (sourceExt === destExt) ||
+            (sourceExt === '.jpg' && destExt === '.jpeg') ||
+            (sourceExt === '.jpeg' && destExt === '.jpg');
+        if (!sameFormat) {
+            throw new Error(
+                'Paintbox: Save As across formats is implemented in Phase 6 ' +
+                `(${sourceExt} → ${destExt}). For now, save to the original format ` +
+                'or use a third-party converter.'
+            );
+        }
+        return this._writeViaWebview(document, destination, cancellation);
     }
 
     async revertCustomDocument(
-        _document: ImageDocument,
+        document: ImageDocument,
         _cancellation: vscode.CancellationToken
     ): Promise<void> {
-        // Phase 5: re-read the file from disk and re-post into the webview.
+        const uriKey = document.uri.toString();
+        const panel = this._webviewByUri.get(uriKey);
+        if (!panel) {
+            throw new Error('Paintbox: no active webview for this document; cannot revert.');
+        }
+        // Reject in-flight saves for this URI (revert supersedes them).
+        this._correlator.cancelByPredicate(
+            (meta) => !!meta && meta.uri.toString() === uriKey,
+            new Error('Paintbox: revert cancelled in-flight save.')
+        );
+        // Clear backup pointer — revert always reads the live disk state.
+        document.backupUri = undefined;
+        await this._postLoadToWebview(panel, document);
+        this._dirtyEpochByUri.delete(uriKey);
+        // Reset shim's dirty epoch so the next edit re-fires.
+        panel.webview.postMessage({ type: 'saved' }).then(undefined, () => { /* noop */ });
     }
 
     async backupCustomDocument(
-        _document: ImageDocument,
-        _context: vscode.CustomDocumentBackupContext,
-        _cancellation: vscode.CancellationToken
+        document: ImageDocument,
+        context: vscode.CustomDocumentBackupContext,
+        cancellation: vscode.CancellationToken
     ): Promise<vscode.CustomDocumentBackup> {
-        // Phase 5: write a backup copy to context.destination.
+        // Phase 5 default 3: fresh export. Reuses _writeViaWebview, redirected
+        // to context.destination. The format follows the document's URI
+        // extension — backups round-trip the original format.
+        await this._writeViaWebview(document, context.destination, cancellation);
         return {
-            id: _context.destination.toString(),
-            delete: () => { /* no-op for now */ },
+            id: context.destination.toString(),
+            delete: async (): Promise<void> => {
+                try {
+                    await vscode.workspace.fs.delete(context.destination);
+                } catch {
+                    // VS Code sometimes calls delete after the file is
+                    // already gone; ENOENT is fine.
+                }
+            },
         };
+    }
+
+    // -------------------------------------------------------------------------
+    // Internal helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Read disk bytes (preferring `backupUri` for hot-exit recovery), encode
+     * as a base64 data-URL, and post a `load` message to the webview. Shared
+     * between `resolveCustomEditor` (initial open / retry) and
+     * `revertCustomDocument`.
+     */
+    private async _postLoadToWebview(
+        panel: vscode.WebviewPanel,
+        document: ImageDocument
+    ): Promise<void> {
+        try {
+            const readUri = document.backupUri || document.uri;
+            const bytes = await vscode.workspace.fs.readFile(readUri);
+            const dataUrl =
+                `data:${document.mime};base64,` +
+                Buffer.from(bytes).toString('base64');
+            await panel.webview.postMessage({
+                type: 'load',
+                dataUrl,
+                filename: path.basename(document.uri.fsPath),
+                mime: document.mime,
+            });
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(
+                `Paintbox: failed to read ${document.uri.toString()}: ${message}`
+            );
+        }
+    }
+
+    /**
+     * Single host-initiated save pipeline:
+     *   1. derive format from `destination` extension (Gate 1 of design §8);
+     *   2. find the per-URI webview;
+     *   3. register a pending entry in the correlator with a 30s timeout;
+     *   4. post `requestSave` to the webview;
+     *   5. await the bytes; if MIME validates, write to disk;
+     *   6. clear dirty gate; tell shim the save completed.
+     *
+     * Reused by `saveCustomDocument`, `saveCustomDocumentAs` (same-format),
+     * and `backupCustomDocument`.
+     */
+    private async _writeViaWebview(
+        document: ImageDocument,
+        destination: vscode.Uri,
+        cancellation: vscode.CancellationToken
+    ): Promise<void> {
+        // Gate 1 (design §8): pre-flight format validation.
+        const ext = path.extname(destination.fsPath).toLowerCase();
+        const formatEntry = FORMAT_BY_EXT[ext];
+        if (!formatEntry) {
+            throw new Error(
+                `Paintbox: cannot save to "${destination.fsPath}" — extension "${ext}" is not supported. ` +
+                'Supported extensions: .png, .jpg, .jpeg, .webp, .bmp, .gif.'
+            );
+        }
+        const { format, mime } = formatEntry;
+
+        const uriKey = document.uri.toString();
+        const panel = this._webviewByUri.get(uriKey);
+        if (!panel) {
+            throw new Error('Paintbox: no active webview for this document.');
+        }
+
+        if (cancellation.isCancellationRequested) {
+            throw new Error('Paintbox: save cancelled.');
+        }
+
+        const requestId = crypto.randomUUID();
+
+        // Register the pending entry FIRST so the correlator is armed when we
+        // post requestSave.
+        const bytesPromise = this._correlator.register(requestId, SAVE_TIMEOUT_MS, {
+            uri: document.uri,
+            expectedMime: mime,
+            expectedFormat: format,
+        });
+
+        // Wire cancellation token. If cancelled mid-flight, reject the
+        // pending and abandon the save. (Mocha-driven tests pass a fresh
+        // CancellationTokenSource; production gets VS Code's token.)
+        const cancelSub = cancellation.onCancellationRequested(() => {
+            this._correlator.cancel(requestId, new Error('Paintbox: save cancelled.'));
+        });
+
+        let bytes: Uint8Array;
+        try {
+            // Post requestSave AFTER the pending entry exists, so the shim's
+            // synchronous reply (in tests) or asynchronous reply (in production
+            // miniPaint) can find the entry.
+            const post = panel.webview.postMessage({
+                type: 'requestSave',
+                requestId,
+                format,
+                filename: path.basename(destination.fsPath),
+            });
+            // VS Code's postMessage returns a Thenable<boolean>. If the panel
+            // is disposed mid-flight, the thenable rejects.
+            Promise.resolve(post).then(undefined, (err: unknown) => {
+                this._correlator.cancel(requestId, new Error(
+                    `Paintbox: failed to message webview — ${err instanceof Error ? err.message : String(err)}`
+                ));
+            });
+
+            bytes = await bytesPromise;
+        } finally {
+            cancelSub.dispose();
+        }
+
+        // Disk write. Failures here surface verbatim through VS Code's
+        // "Save failed: <message>" toast.
+        try {
+            await vscode.workspace.fs.writeFile(destination, bytes);
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            throw new Error(`Paintbox: failed to write file — ${msg}`);
+        }
+
+        // Successful write to the document's own URI clears the dirty gate.
+        // (Save As to a different destination doesn't change the document's
+        // dirty state — VS Code calls saveCustomDocumentAs as a copy
+        // operation. Backups also don't clear the dirty state.)
+        if (destination.toString() === uriKey) {
+            this._dirtyEpochByUri.delete(uriKey);
+            // Tell the shim to reset its `pbDirtyDispatched` gate so the
+            // next edit re-fires `dirty`.
+            panel.webview.postMessage({ type: 'saved', requestId })
+                .then(undefined, () => { /* best-effort */ });
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test seams
+    // -------------------------------------------------------------------------
+
+    /**
+     * Returns true iff `_dirtyEpochByUri` has an entry for the given URI.
+     * Test seam for Test 5b's "dirty cleared after save" assertion.
+     */
+    __pbTestIsDirty(uri: vscode.Uri): boolean {
+        return this._dirtyEpochByUri.get(uri.toString()) === true;
     }
 }

@@ -192,4 +192,66 @@ for now; Phase 7 may revisit if stack traces become noisy.
 
 ---
 
+**2026-04-27 — Phase 5 host-side write: requestId-correlated round-trip via SaveCorrelator**
+
+Phase 5 closes the save loop: VS Code → `saveCustomDocument` → host posts
+`{type:'requestSave', requestId, format, filename}` → shim calls
+`app.File_save.save_action(user_response, false)` directly (bypassing
+miniPaint's modal export popup) → patched bundle's
+`__pbBridge.saveAs(blob, fname)` intercepts → bridge attaches `requestId`
+(stashed pre-call on `window.__pbPendingRequestId`) and posts `saveResult`
+→ host's correlator matches by `requestId`, validates MIME against the
+document's expected MIME (Gate 2), writes bytes via
+`vscode.workspace.fs.writeFile`, clears the dirty gate, posts
+`{type:'saved'}` to reset the shim's epoch.
+
+Key sub-decisions (all 10 design defaults, user-approved):
+1. Dirty tracking via runtime monkey-patch of `app.State.do_action` in the
+   shim. Once-per-save gate (`pbDirtyDispatched`); reset on host's `saved`
+   message. Defensive fallback to first-pointerdown if `app.State` is
+   absent at shim init.
+2. `saveCustomDocumentAs`: same-format only in Phase 5; cross-format
+   throws `"Paintbox: Save As across formats is implemented in Phase 6"`.
+3. Backup: fresh export to `context.destination` via the same
+   `_writeViaWebview` pipeline. `openCustomDocument` honors
+   `openContext.backupId` by stashing it on `document.backupUri`; the
+   shared post-load helper reads from that URI when present.
+4. User-initiated saves (File menu inside webview) without a `requestId`:
+   logged and ignored. Never write to disk on an unsolicited bridge emit
+   — silently overwriting a workspace file in response to a button click
+   the user thought meant "download" is a trust violation.
+5. 30s timeout per save, hard-coded in `SaveCorrelator.register`.
+6. `crypto.randomUUID()` for `requestId` — Node stdlib, no collisions.
+7. `.vscodeignore` Phase 4 reviewer bugs deferred to Phase 7 — not
+   touched.
+8. VS Code undo/redo callbacks on `_onDidChangeCustomDocument`: no-op
+   stubs with `console.debug`. miniPaint's in-canvas Ctrl-Z continues to
+   work (webview keyboard ownership). Phase 6+ may bridge if the niche
+   case (Edit > Undo from menubar with webview unfocused) becomes a
+   complaint.
+9. Test seams: static `__pbTestGetActive()` accessor on the provider;
+   instance-level `__pbTestIsDirty(uri)`. Tests reach the correlator via
+   the provider; correlator exposes `__pbTestGetMeta(requestId)` for the
+   provider's onMessage handler to peek meta before `handleSaveResult`
+   consumes the entry (used for Gate 2 MIME check). Reviewer flagged the
+   accessor name lies about its production use — Phase 6 to rename.
+10. `pixel-2x2.png` fixture committed as a real 76-byte binary PNG with
+    distinct row0=[red,green] / row1=[blue,white] pixels; full byte
+    string documented in `src/test/suite/save.test.ts` for auditability.
+
+Correlation logic extracted to `src/saveCorrelator.ts` so Test 5a is a
+pure unit test (no `vscode` import). Provider composes a
+`SaveCorrelator<PendingMeta>` instance; `cancelByPredicate(meta-pred,
+error)` is used to reject in-flight saves on webview disposal and on
+revert. Test 5b proves the round-trip with a SHA-256 disk-vs-webview-bytes
+assertion on a real `os.tmpdir()` file.
+
+Phase 4's saveResult log line was removed when Phase 5 took over the case
+branch; the structural `case 'saveResult'` / `case 'saveError'` regex
+checks in test 4b still hold. Bundle
+`vendor/minipaint/dist/bundle.js` SHA-256 unchanged (`d084e26…83356`).
+Phase 5 changes are host + shim only.
+
+---
+
 *(Add new entries at the bottom, newest last.)*

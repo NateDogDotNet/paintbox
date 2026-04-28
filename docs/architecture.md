@@ -40,13 +40,26 @@ sequenceDiagram
     Note over FS,WV: EDIT (entirely in webview — extension host is idle)
     WV->>WV: User applies layers, filters, edits
 
+    Note over FS,WV: DIRTY (any edit — Phase 5)
+    WV->>WV: app.State.do_action(...) — monkey-patched in shim
+    WV->>Host: postMessage({type:'dirty'})  (once per save epoch)
+    Host->>API: _onDidChangeCustomDocument.fire(...)  (tab dot lights up)
+
     Note over FS,WV: SAVE (Ctrl+S / File > Save)
     API->>Host: saveCustomDocument(document, cancellation)
-    Host->>WV: webview.postMessage({type:'requestSave', format:'png'})
-    WV->>WV: miniPaint File_save exports to Blob/ArrayBuffer
-    WV->>Host: webview.postMessage({type:'saveResult', bytes:[...]})
+    Host->>Host: requestId = crypto.randomUUID()
+    Host->>Host: SaveCorrelator.register(requestId, 30s timeout)
+    Host->>WV: postMessage({type:'requestSave', requestId, format:'PNG', filename})
+    WV->>WV: stash __pbPendingRequestId = requestId
+    WV->>WV: app.File_save.save_action({name, type, ...}, false)
+    WV->>WV: miniPaint encodes canvas → Blob
+    WV->>WV: __pbBridge.saveAs(blob, fname) intercepts (patched bundle)
+    WV->>Host: postMessage({type:'saveResult', requestId, bytes, mime, format, filename})
+    Host->>Host: SaveCorrelator.handleSaveResult — Gate 2: MIME check
     Host->>FS: workspace.fs.writeFile(uri, Uint8Array)
     FS-->>Host: write confirmed
+    Host->>Host: clear _dirtyEpochByUri[uri]
+    Host->>WV: postMessage({type:'saved', requestId})  (resets shim's dirty epoch)
     Host-->>API: saveCustomDocument resolves (file marked clean)
 ```
 
