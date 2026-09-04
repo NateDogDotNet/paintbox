@@ -1,3 +1,15 @@
+> [!IMPORTANT]
+> **miniPaint is not my project.** The image editor in this repository is
+> [miniPaint](https://github.com/viliusle/miniPaint) by [ViliusL](https://github.com/viliusle),
+> MIT-licensed. Every tool, every filter, every menu, every pixel of its UX is upstream work.
+>
+> What this repository adds is the VS Code packaging, and nothing more: a `CustomEditorProvider`
+> that opens a real file from disk, hands the bytes to miniPaint, and writes the edited bytes back
+> when you save. That round-trip is the whole contribution here.
+>
+> If this is useful to you, the credit belongs upstream — go star
+> [viliusle/miniPaint](https://github.com/viliusle/miniPaint).
+
 # miniPaint for VS Code
 *npm id: `paintbox` · GitHub: [NateDogDotNet/paintbox](https://github.com/NateDogDotNet/paintbox)*
 
