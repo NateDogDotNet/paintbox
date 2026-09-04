@@ -459,8 +459,10 @@ export class PaintboxEditorProvider
         document.backupUri = undefined;
         await this._postLoadToWebview(panel, document);
         this._dirtyEpochByUri.delete(uriKey);
-        // Reset shim's dirty epoch so the next edit re-fires.
-        panel.webview.postMessage({ type: 'saved' }).then(undefined, () => { /* noop */ });
+        // Reset shim's dirty epoch so the next edit re-fires. Fire-and-forget:
+        // if the editor closed during the read above there is no shim left to
+        // tell, and that is not an error.
+        void this._postIfAlive(panel, { type: 'saved' });
     }
 
     async backupCustomDocument(
@@ -495,6 +497,44 @@ export class PaintboxEditorProvider
      * between `resolveCustomEditor` (initial open / retry) and
      * `revertCustomDocument`.
      */
+    /**
+     * Post to a panel that may already be disposed.
+     *
+     * `WebviewPanel.webview` is a GETTER that throws `Webview is disposed`
+     * once VS Code tears the panel down. The throw is synchronous, so a
+     * `.then(undefined, …)` on the returned thenable never sees it — the
+     * exception escapes before there is a promise to attach to.
+     *
+     * This matters because the provider looks a panel up in `_webviewByUri`
+     * and then awaits (a disk read, a correlator round-trip). The editor can
+     * close during that await: VS Code still delivers `$revert` / `$backup`
+     * for the document, `onDidDispose` has already run or is about to, and the
+     * panel handle in hand is dead.
+     *
+     * Returns false when the panel was gone, so callers can distinguish "the
+     * editor closed" from a real failure and stay quiet about the former.
+     *
+     * See docs/architecture.md DC-11.
+     */
+    private async _postIfAlive(
+        panel: vscode.WebviewPanel,
+        message: unknown
+    ): Promise<boolean> {
+        let post: Thenable<boolean>;
+        try {
+            post = panel.webview.postMessage(message);
+        } catch {
+            // Disposed between the map lookup and here. Nothing to notify.
+            return false;
+        }
+        try {
+            return await post;
+        } catch {
+            // Disposed mid-flight; VS Code rejects the thenable.
+            return false;
+        }
+    }
+
     private async _postLoadToWebview(
         panel: vscode.WebviewPanel,
         document: ImageDocument
@@ -505,7 +545,9 @@ export class PaintboxEditorProvider
             const dataUrl =
                 `data:${document.mime};base64,` +
                 Buffer.from(bytes).toString('base64');
-            await panel.webview.postMessage({
+            // A closed editor needs no load message, and a disposed panel is
+            // not a read failure — never surface it as one.
+            await this._postIfAlive(panel, {
                 type: 'load',
                 dataUrl,
                 filename: path.basename(document.uri.fsPath),

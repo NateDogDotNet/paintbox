@@ -392,6 +392,29 @@ no matching `requestId`, so it takes the unsolicited path in DC-6 and never
 writes in place. That is the ghost-write prevention: nothing silently lands on
 disk in a format the editor did not declare.
 
+### DC-11 — Every post after an `await` goes through `_postIfAlive`
+
+`WebviewPanel.webview` is a **getter that throws** `Webview is disposed` once VS
+Code tears the panel down. The throw is synchronous, so the usual
+`postMessage(...).then(undefined, noop)` guard never sees it — the exception
+escapes before there is a promise to attach a handler to.
+
+That matters because the provider looks a panel up in `_webviewByUri` and then
+awaits: a disk read, a correlator round-trip. The editor can close during that
+await. VS Code still delivers `$revert` and `$backup` for the document,
+`onDidDispose` has already run or is about to, and the panel handle in hand is
+dead.
+
+So the rule is: **a bare `panel.webview.postMessage(...)` is only safe before the
+first `await` in a method.** Everything after one goes through
+`_postIfAlive(panel, message)`, which swallows both the synchronous getter throw
+and a mid-flight rejection, and returns `false` when the panel was gone. Callers
+use that to tell "the editor closed" apart from a real failure — a closed editor
+needs no load message and no `saved` ping, and neither is worth a toast.
+
+Covered by test `5g`, which replaces the panel's `webview` with a throwing
+getter and asserts revert both resolves and stays silent.
+
 ### Test strategy
 
 Three suites in `src/test/suite/`, run by `npm test` through

@@ -326,6 +326,9 @@ suite('Paintbox Phase 5 — Save (host writes bytes to disk)', () => {
             __pbTestIsDirty: (uri: vscode.Uri) => boolean;
         };
         document: { uri: vscode.Uri; mime: string };
+        /** The fake panel handed to `resolveCustomEditor`, so a test can
+         *  simulate VS Code disposing it. */
+        panel: vscode.WebviewPanel;
         messageHandler: (m: PostedMessage) => void | Promise<void>;
         posted: PostedMessage[];
         cleanup: () => Promise<void>;
@@ -406,6 +409,7 @@ suite('Paintbox Phase 5 — Save (host writes bytes to disk)', () => {
         return {
             provider: provider as Harness['provider'],
             document: document as Harness['document'],
+            panel: fakePanel,
             messageHandler: messageHandler!,
             posted,
             cleanup: async () => {
@@ -617,6 +621,67 @@ suite('Paintbox Phase 5 — Save (host writes bytes to disk)', () => {
             await h.cleanup();
         }
     });
+
+    // ---- Test 5g — revert tolerates a webview disposed mid-flight --------
+
+    /**
+     * Monkey-patch helper for `vscode.window.showErrorMessage`, same shape as
+     * `installWarnStub` below. Restored in a `finally`.
+     */
+    function installErrorStub() {
+        const original = vscode.window.showErrorMessage;
+        let callCount = 0;
+        let lastMessage = '';
+        (vscode.window as unknown as { showErrorMessage: (...args: unknown[]) => Thenable<string | undefined> })
+            .showErrorMessage = (...args: unknown[]) => {
+                callCount++;
+                lastMessage = String(args[0] || '');
+                return Promise.resolve(undefined);
+            };
+        return {
+            get callCount() { return callCount; },
+            get lastMessage() { return lastMessage; },
+            restore: () => {
+                (vscode.window as unknown as { showErrorMessage: unknown }).showErrorMessage = original;
+            },
+        };
+    }
+
+    test('5g — revertCustomDocument survives a webview disposed mid-flight', async function () {
+        this.timeout(10_000);
+        const h = await makeHarness(FIXTURE_1x1_PNG, 'revert-disposed.png');
+        const errStub = installErrorStub();
+        try {
+            // Real VS Code makes `WebviewPanel.webview` a getter that THROWS
+            // once the panel is disposed, so a `.then(undefined, …)` handler
+            // never sees it — the throw is synchronous. VS Code can still
+            // deliver $revert for a document whose editor closed while an
+            // earlier await was in flight, which is exactly this race: the
+            // provider already holds the panel from `_webviewByUri`.
+            Object.defineProperty(h.panel, 'webview', {
+                configurable: true,
+                get() { throw new Error('Webview is disposed'); },
+            });
+
+            // Must resolve. A closed editor needs no load and no 'saved' ping.
+            await h.provider.revertCustomDocument(
+                h.document,
+                new vscode.CancellationTokenSource().token
+            );
+
+            // And it must stay quiet: a disposed panel is not a read failure,
+            // so the user must not see "failed to read <uri>".
+            assert.strictEqual(
+                errStub.callCount,
+                0,
+                `revert on a disposed webview must not raise an error toast; got: ${errStub.lastMessage}`
+            );
+        } finally {
+            errStub.restore();
+            await h.cleanup();
+        }
+    });
+
 
 });
 
