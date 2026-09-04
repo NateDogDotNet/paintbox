@@ -5,8 +5,21 @@ import { runTests } from '@vscode/test-electron';
  * Driver that downloads (and caches) a VS Code build, launches it, and runs
  * the Mocha suite at out/test/suite/index.js inside that VS Code instance.
  *
- * Headless environments need a display. If running in a container without
- * one, wrap this with `xvfb-run -a npm test`.
+ * Headless environments need a display. In a container without one:
+ *
+ *     xvfb-run -a npm test
+ *
+ * That needs BOTH packages — `xvfb` and `xauth`. `xvfb-run` shells out to
+ * `xauth` to write the cookie for the display it creates, so with `xvfb`
+ * alone it exits 3 with `xvfb-run: error: xauth command not found`, which
+ * reads like a missing display rather than a missing package. On Debian:
+ *
+ *     sudo apt-get install -y xvfb xauth
+ *
+ * If you cannot install packages, run a display yourself instead:
+ *
+ *     Xvfb :99 -screen 0 1280x1024x24 &
+ *     DISPLAY=:99 npm test
  */
 async function main(): Promise<void> {
     try {
