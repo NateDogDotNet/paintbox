@@ -1,4 +1,4 @@
-// PAINTBOX-PATCH-BEGIN (Phase 4 — see docs/architecture.md §1)
+// PAINTBOX-PATCH-BEGIN (Phase 4 — save-to-host round-trip; see docs/architecture.md)
 // The original `filesaver` import is replaced with a paintbox-aware shim that
 // routes saveAs() calls through window.__pbBridge when available (postMessage
 // to the extension host) and falls back to the bundled file-saver lib when
