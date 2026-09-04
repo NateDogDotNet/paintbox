@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-**Scaffolded skeleton, not yet functional.** `src/` compiles and registers a `CustomEditorProvider`, but every save/load path is a TODO. Implementation work proceeds phase-by-phase per `docs/integration-plan.md` (Phases 1–7). Each phase has explicit entry/exit criteria — when picking up work, identify the current phase first and respect the boundaries.
+**v0.1.0 — built and working.** The round-trip is closed: open an image, edit it in miniPaint, hit Save, and `saveCustomDocument` writes the bytes back to the source URI with `vscode.workspace.fs.writeFile`. Phases 1 through 7a of `docs/integration-plan.md` are done and `CHANGELOG.md` records what landed in each. `npm run compile` and `npm run lint` both pass clean; `src/` carries no TODO or not-implemented markers.
+
+What remains is Phase 7b — publishing to Open VSX. Treat the publishing checklist at the end of `docs/integration-plan.md` as stale rather than authoritative: several boxes are unticked but already satisfied (LICENSE, `THIRD_PARTY_LICENSES.md`, README screenshot). Verify each one against the repo instead of trusting the box.
+
+Phases still have explicit entry/exit criteria. When extending the work, say which phase you are in and respect the boundaries.
 
 ## Commands
 
@@ -17,7 +21,9 @@ npm run package          # vsce package --no-yarn  (produces paintbox-<version>.
 npm run publish:ovsx     # ovsx publish; requires OVSX_PAT env var
 ```
 
-To exercise the extension: open this repo in VS Code / code-server and press F5 → Extension Development Host. There is no test runner wired up yet (`npm test` references `out/test/runTest.js` which doesn't exist); add the `@vscode/test-electron` harness when introducing the first test.
+To exercise the extension: open this repo in VS Code / code-server and press F5 → Extension Development Host.
+
+`npm test` runs the `@vscode/test-electron` harness (wired up in Phase 2); `pretest` compiles first. Three suites live in `src/test/suite/` — `extension.test.ts` (activation), `save.test.ts` (the write path), and `correlator.test.ts` (a pure unit test of `SaveCorrelator`, deliberately free of any `vscode` import). The driver downloads a real VS Code build and needs a display: in a container, use `xvfb-run -a npm test`.
 
 ## Architecture
 
@@ -28,9 +34,13 @@ Server FS  ←→  Extension Host (Node, src/)  ←→  Webview (miniPaint, vend
               vscode.workspace.fs.{read,write}File          postMessage bridge
 ```
 
-- **`src/extension.ts`** — `activate()` registers the provider. That's it.
+- **`src/extension.ts`** — `activate()` registers the provider and calls `verifyPatchedBundle()`. That's it.
 - **`src/editorProvider.ts`** — `PaintboxEditorProvider` implements `CustomEditorProvider<ImageDocument>`. The four lifecycle methods (`openCustomDocument`, `resolveCustomEditor`, `saveCustomDocument`, `saveCustomDocumentAs`) are the only places that touch disk; everything else is the webview's problem.
-- **`vendor/minipaint/`** — upstream miniPaint, committed copy at v4.14.3 (not a submodule). Populated in Phase 1. The save hook (`File_save_class` in `vendor/minipaint/src/js/modules/file/save.js`) gets patched to `postMessage` instead of triggering a browser download.
+- **`src/saveCorrelator.ts`** — maps `requestId` strings to pending save promises, with timeouts. Extracted out of the provider on purpose so it stays unit-testable without importing `vscode`.
+- **`src/webviewHtml.ts`** — pure function that reads upstream `vendor/minipaint/index.html` and applies the transforms that make it work in a webview (a `<base href>` pointing at the vendored dir is the load-bearing one — style-loader emits relative `url()` references that nothing else rewrites).
+- **`src/patchMinipaintBundle.ts`** + **`scripts/patch-bundle.js`** — the build-time bundle patch, run by `npm run compile`, never at activation. It reroutes miniPaint's 8 `p().saveAs(` call sites through `window.__pbBridge` and strips GIF/BMP from `SAVE_TYPES`. It asserts exactly 8 call sites and throws otherwise, so an upstream bump fails loudly instead of silently half-patching. The VSIX ships pre-patched.
+- **`src/webview/shim.ts`** — runs inside the webview. Installs `window.__pbBridge` before the bundle loads, hands incoming bytes to miniPaint's `File_open`, and drives `FileSave.save_action` on a save request so no export modal appears.
+- **`vendor/minipaint/`** — upstream miniPaint, committed copy at v4.14.3 (not a submodule). Vendored in Phase 1. Its `File_save_class` (`vendor/minipaint/src/js/modules/file/save.js`) carries an inline `PAINTBOX-PATCH` marker; the `dist/bundle.js` rewrite happens at build time, not in the committed source.
 
 The full sequence diagram and rationale for `postMessage` as the only bridge is in `docs/architecture.md`. Read that before touching the host↔webview boundary.
 
@@ -58,4 +68,4 @@ The user values KISS, YAGNI, TDD, and best practices. In this codebase that mean
 
 - Match the phased plan — don't implement Phase 5 logic while ostensibly fixing Phase 3. If a phase boundary is in the way, propose moving it explicitly.
 - No speculative abstractions for "future formats" or "future editors." miniPaint + the six declared MIME types is the scope.
-- When introducing test infrastructure (no tests exist yet), wire it up before or alongside the feature it covers, not after.
+- Tests exist (`src/test/suite/`). New behaviour lands with its test in the same change, not after.
