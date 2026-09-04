@@ -12,12 +12,12 @@ import * as path from 'path';
  *      after `<head>`. This rewrites every relative URL miniPaint emits at
  *      runtime (style-loader injects `<style>` tags with relative
  *      url('images/icons/*.svg') references — only `<base href>` covers them).
- *   2. Inject CSP `<meta>`. See Phase 3 design §4.
+ *   2. Inject CSP `<meta>`. See docs/architecture.md DC-4 and DC-6.
  *   3. Phase 4 — rewrite `<script src="dist/bundle.js">` to point at the
  *      paintbox-patched bundle (out/webview/minipaint-bundle.patched.js) via
  *      asWebviewUri, AND inject the shim `<script>` immediately BEFORE the
  *      patched bundle so window.__pbBridge is defined before the bundle runs.
- *      See .orchestrator/phase4-design.md §2c + §5.
+ *      See docs/architecture.md DC-3 and DC-4.
  *   4. Inject the chrome `<style>` block + the `pb_chrome` overlay markup
  *      immediately before `</body>` (Phase 3). The shim is no longer
  *      injected here in Phase 4 — it loads from the head per (3) above.
@@ -25,16 +25,15 @@ import * as path from 'path';
  * The function is pure (no side effects beyond `fs.readFileSync`) so test 3a
  * can call it directly with a stub Webview.
  *
- * Architectural rationale: see `.orchestrator/phase3-design.md` §2 (option a:
- * "read upstream, rewrite via injection, do not patch upstream HTML") and
- * `.orchestrator/phase4-design.md` §2c.
+ * Architectural rationale: see `docs/architecture.md` DC-4 (option a:
+ * "read upstream, rewrite via injection, do not patch upstream HTML").
  */
 
 export interface BuildWebviewHtmlOptions {
     /**
-     * Initial filename caption for the loading overlay. Phase 3 design §9 Q2:
-     * basename in the loading overlay; full URI surfaces only in error
-     * overlays via host postMessage.
+     * Initial filename caption for the loading overlay. Deliberately the
+     * basename only; the full URI surfaces just in error overlays, via host
+     * postMessage.
      */
     filename: string;
 }
@@ -99,7 +98,7 @@ export function buildWebviewHtml(
     // Phase 4 transform: rewrite the upstream `<script src="dist/bundle.js">`
     // to point at the paintbox-patched bundle, and inject the shim `<script>`
     // immediately BEFORE it so window.__pbBridge is defined before the bundle
-    // runs (see phase4-design.md §5 ordering decision).
+    // runs (see docs/architecture.md DC-3 for the ordering decision).
     const bundleScriptReplaced = html.replace(
         /<script src="dist\/bundle\.js"><\/script>/,
         `<script src="${shimUri}"></script>\n\t<script src="${patchedBundleUri}"></script>`
@@ -111,7 +110,7 @@ export function buildWebviewHtml(
         throw new Error(
             'Paintbox: vendor/minipaint/index.html no longer contains ' +
             '<script src="dist/bundle.js"></script>. ' +
-            'See .orchestrator/phase4-design.md §2c.'
+            'See docs/architecture.md DC-4.'
         );
     }
     html = bundleScriptReplaced;

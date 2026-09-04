@@ -15,7 +15,7 @@ import { verifyPatchedBundle } from './patchMinipaintBundle';
  *   Phase 7 — package + publish to Open VSX
  */
 export function activate(context: vscode.ExtensionContext): void {
-    // Phase 4 (per .orchestrator/phase4-design.md §2c + override Q1):
+    // Phase 4 (see docs/architecture.md DC-2 and DC-4):
     // verify the patched miniPaint bundle artifact exists and is intact.
     // The patch runs at build time only (scripts/patch-bundle.js), so any
     // failure here means the VSIX shipped without the artifact OR a local

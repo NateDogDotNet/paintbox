@@ -3,7 +3,7 @@
 // GIF + BMP entries from miniPaint's SAVE_TYPES dict, and write the result to
 // out/webview/minipaint-bundle.patched.js.
 //
-// Per .orchestrator/phase4-design.md §2b plus orchestrator override Q1:
+// Per docs/architecture.md DC-2:
 //   - Build-time only. `npm run compile` runs this. The VSIX ships pre-patched.
 //   - Activation only verifies the artifact (verifyPatchedBundle below).
 //   - Integrity check: exactly 8 occurrences of `p().saveAs(` in the source
@@ -104,7 +104,7 @@ export function patchMinipaintBundle(extensionRoot: string): string {
             'Expected ' + EXPECTED_SITES + ' "p().saveAs(" call sites, found ' +
             (matches ? matches.length : 0) + '. ' +
             'The vendored bundle may have been updated upstream — ' +
-            're-run the audit in .orchestrator/phase4-design.md §1 ' +
+            're-run the audit in docs/architecture.md DC-1 ' +
             'before proceeding.'
         );
     }

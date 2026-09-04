@@ -3,7 +3,7 @@ import * as assert from 'assert';
 /**
  * Test 5a — UNIT — pure SaveCorrelator correlation logic.
  *
- * Per .orchestrator/phase5-design.md §10 Test 5a, the correlation Map +
+ * Per docs/architecture.md DC-7 and Test strategy, the correlation Map +
  * register/handleSaveResult/handleSaveError logic is extracted into a separate
  * module (`src/saveCorrelator.ts`) so this test can run without any vscode
  * dependency. The provider then composes a SaveCorrelator instance.

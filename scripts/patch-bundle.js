@@ -2,7 +2,7 @@
 // Build-time wrapper. Invoked from package.json's `compile` script after
 // the host TypeScript build emits out/patchMinipaintBundle.js.
 //
-// Per .orchestrator/phase4-design.md §9 + orchestrator override Q1: the patch
+// Per docs/architecture.md DC-2: the patch
 // runs at build time only. The VSIX ships pre-patched. Activation just
 // verifies the artifact (verifyPatchedBundle in src/patchMinipaintBundle.ts).
 

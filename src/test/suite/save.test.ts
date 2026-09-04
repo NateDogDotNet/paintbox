@@ -7,8 +7,8 @@ import * as vm from 'vm';
 import * as vscode from 'vscode';
 
 /**
- * Phase 4 + Phase 5 tests (see .orchestrator/phase4-design.md §8 and
- * .orchestrator/phase5-design.md §10).
+ * Phase 4 + Phase 5 tests (see docs/architecture.md DC-2, DC-7 and
+ * Test strategy).
  *
  *   4a — UNIT: window.__pbBridge.saveAs(blob, fname) serializes to a
  *        `saveResult` postMessage with the expected fields. Runs the shim
@@ -623,7 +623,7 @@ suite('Paintbox Phase 5 — Save (host writes bytes to disk)', () => {
 // ---------- Phase 6 tests (cross-format Save As + lossy warning UX) -------
 
 /**
- * Phase 6 tests (see .orchestrator/phase6-design.md §7 + orchestrator override).
+ * Phase 6 tests (see docs/architecture.md DC-10 and Test strategy).
  *
  *   6a (MANDATORY) — Cross-format Save As round-trip with real disk write.
  *                    Stub showWarningMessage → 'Save Anyway'; assert JPEG magic
@@ -1047,7 +1047,7 @@ suite('Paintbox Phase 6 — Save As + Format Conversion', () => {
 // ---------- Phase 6.6 tests (unsolicited saveResult + Print sentinel) -----
 
 /**
- * Phase 6.6 tests (see .orchestrator/phase6.6-design.md §Tests).
+ * Phase 6.6 tests (see docs/architecture.md DC-6).
  *
  *   6.6b — Unsolicited saveResult (no matching requestId) → showSaveDialog
  *          returns a tmp Uri → file written; SHA-256 match; info toast

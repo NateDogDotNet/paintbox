@@ -7,7 +7,7 @@
 //   Phase 4 — install window.__pbBridge.saveAs(blob, fname) BEFORE the bundle
 //   runs. The patched bundle's `(window.__pbBridge||p()).saveAs(...)` call
 //   sites then route bytes via postMessage instead of triggering a browser
-//   download. See .orchestrator/phase4-design.md §5.
+//   download. See docs/architecture.md DC-3.
 //   Phase 5 — close the round-trip:
 //     • handle host→webview {type:'requestSave', requestId, format, filename}
 //       by calling window.FileSave.save_action({…}, false) directly, bypassing
@@ -19,10 +19,9 @@
 //     • reset the dirty gate when the host posts {type:'saved'}.
 //   Phase 6.5 — switch the polling target from `window.app.File_open` (never
 //   set by miniPaint v4.14.3's bundle) to upstream-exposed `window.FileOpen`
-//   / `window.FileSave` / `window.State`. See .orchestrator/phase6.5-design.md.
+//   / `window.FileSave` / `window.State`. See docs/architecture.md DC-5.
 //
-// Design contract: see .orchestrator/phase3-design.md §6 + phase4-design.md §5
-// + phase5-design.md §1 and §2 + phase6.5-design.md §2.
+// Design contract: see docs/architecture.md DC-3, DC-4, DC-5 and DC-9.
 //
 // IMPORTANT — build constraints:
 //   This file compiles via tsconfig.webview.json (module:"none", target:"ES2020").
@@ -41,7 +40,7 @@ declare function acquireVsCodeApi(): {
 // upstream `app` singleton is module-private (webpack minifies it to `v.A`).
 // What the bundle DOES expose, deliberately, are three module classes on
 // window: `window.FileOpen`, `window.FileSave`, `window.State`. The shim uses
-// THOSE directly. See .orchestrator/phase6.5-design.md §2 for the byte-dump
+// THOSE directly. See docs/architecture.md DC-5 for the byte-dump
 // evidence and rejected-alternative rationale.
 interface MiniPaintFileOpen {
     file_open_data_url_handler?: (dataUrl: string) => unknown;
@@ -49,7 +48,7 @@ interface MiniPaintFileOpen {
 interface MiniPaintFileSave {
     // miniPaint's `save_action(user_response, autoname)` is the non-popup
     // entry point. Its `user_response` shape is read from
-    // vendor/minipaint/src/js/modules/file/save.js (see Phase 5 design §2).
+    // vendor/minipaint/src/js/modules/file/save.js (see docs/architecture.md DC-7).
     save_action?: (user_response: unknown, autoname: boolean) => unknown;
 }
 interface MiniPaintState {
@@ -297,7 +296,7 @@ type HostMessage = LoadMessage | { type: string; [k: string]: unknown };
             // Stash requestId so the bridge attaches it to the eventual
             // saveResult / saveError. Cleared by the bridge after first use.
             (window as unknown as { __pbPendingRequestId?: string }).__pbPendingRequestId = requestId;
-            // user_response shape per save.js:463 (see Phase 5 design §2).
+            // user_response shape per save.js:463 (see docs/architecture.md DC-7).
             //   name: filename WITH extension (save_action auto-appends if
             //         missing, but our host always sends one).
             //   type: bare key — line 480 splits on space, so 'PNG' works.
@@ -390,8 +389,8 @@ type HostMessage = LoadMessage | { type: string; [k: string]: unknown };
                 // miniPaint's open path is async-ish (Image.onload). The
                 // double-rAF heuristic gives the browser time to decode the
                 // <img> and miniPaint time to commit a layer before we declare
-                // ready. Phase 3 design §6 notes the upgrade path if this
-                // proves flaky (monkey-patch window.State.do_action).
+                // ready. If this proves flaky, the upgrade path is the same
+                // hook DC-9 uses (monkey-patch window.State.do_action).
                 requestAnimationFrame(() =>
                     requestAnimationFrame(() => {
                         // After a fresh load, the canvas matches disk: clear

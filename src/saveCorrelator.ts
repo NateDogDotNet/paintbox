@@ -13,7 +13,7 @@
  *      Resolves the matching entry with the bytes. Returns true on match.
  *      Returns false (silent) on no-match — the provider's onMessage handler
  *      is expected to log and ignore in that case (default 4 from
- *      .orchestrator/phase5-design.md §10).
+ *      docs/architecture.md DC-6).
  *
  *   handleSaveError(requestId, errorMsg) → boolean
  *      Rejects the matching entry with `Error('Paintbox: <errorMsg>')`.

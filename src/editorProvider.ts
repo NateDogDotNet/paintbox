@@ -10,7 +10,7 @@ import { SaveCorrelator } from './saveCorrelator';
  * Phase 3 stores no bytes here: the host re-reads from disk on every load
  * (initial open AND retry) so the document remains a thin URI wrapper. Phase 5
  * adds an optional `backupUri` for hot-exit recovery (CustomDocumentBackup
- * round-trip; see Phase 5 design §7).
+ * round-trip; see docs/architecture.md DC-8).
  */
 class ImageDocument implements vscode.CustomDocument {
     readonly uri: vscode.Uri;
@@ -37,7 +37,7 @@ class ImageDocument implements vscode.CustomDocument {
  * Phase 3 file extension → MIME map. Covers exactly the four extensions
  * declared in `package.json` `contributes.customEditors[].selector`. Anything
  * else (e.g. `.tiff`) gets a synthesized `image/octet-stream` and the shim
- * surfaces a defensive error overlay (see Phase 3 design §9 Q1).
+ * surfaces a defensive error overlay (see docs/architecture.md DC-4).
  *
  * Phase 6.8 dropped `.gif` and `.bmp`: miniPaint's GIF encoder uses a
  * Web Worker that the webview's CSP blocks, and most browsers don't ship
@@ -55,7 +55,7 @@ const MIME_BY_EXT: Record<string, string> = {
  * Phase 5 file extension → {format, mime} map. The format string is what
  * miniPaint's `save_action` accepts (line 480 of vendor save.js splits on
  * space, so `'PNG'` is sufficient). MIME is what we expect back on
- * `saveResult.mime`; mismatch → Gate 2 reject (design §8).
+ * `saveResult.mime`; mismatch → Gate 2 reject (docs/architecture.md DC-10).
  *
  * Lives next to MIME_BY_EXT but kept distinct: MIME_BY_EXT serves the OPEN
  * path (load message) where we don't need miniPaint's format key; FORMAT_BY_EXT
@@ -521,7 +521,7 @@ export class PaintboxEditorProvider
 
     /**
      * Single host-initiated save pipeline:
-     *   1. derive format from `destination` extension (Gate 1 of design §8);
+     *   1. derive format from `destination` extension (Gate 1, DC-10);
      *   2. find the per-URI webview;
      *   3. register a pending entry in the correlator with a 30s timeout;
      *   4. post `requestSave` to the webview;
@@ -536,7 +536,7 @@ export class PaintboxEditorProvider
         destination: vscode.Uri,
         cancellation: vscode.CancellationToken
     ): Promise<void> {
-        // Gate 1 (design §8): pre-flight format validation.
+        // Gate 1 (docs/architecture.md DC-10): pre-flight format validation.
         const ext = path.extname(destination.fsPath).toLowerCase();
         const formatEntry = FORMAT_BY_EXT[ext];
         if (!formatEntry) {

@@ -116,8 +116,8 @@ host→webview `{type:'load', dataUrl, filename, mime}`; webview→host
 `file_open_data_url_handler` consumes it natively (single conversion) and
 serializes ~6× smaller than a JSON-encoded number array.
 
-Full design rationale and the chrome HTML/CSS/JS spec live at
-`.orchestrator/phase3-design.md` (orchestrator artifact, gitignored).
+Full design rationale and the chrome HTML/CSS/JS spec are folded into
+`docs/architecture.md` DC-4.
 
 ---
 
@@ -147,7 +147,7 @@ vendored `src/js/modules/file/save.js` is NOT loaded at runtime;
 `vendor/minipaint/index.html` only loads `dist/bundle.js`. Source-only patches
 would be dead text.
 
-Strategy: hybrid (D-prime in `.orchestrator/phase4-design.md` §1).
+Strategy: hybrid (see `docs/architecture.md` DC-1).
 1. **Bundle text-replace (load-bearing).** `scripts/patch-bundle.js` (chained
    from `npm run compile`) reads `vendor/minipaint/dist/bundle.js`, rewrites
    the 8 `p().saveAs(` call sites to

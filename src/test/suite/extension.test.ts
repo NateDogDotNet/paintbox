@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as vscode from 'vscode';
 
 /**
- * Phase 3 tests (see docs/integration-plan.md and .orchestrator/phase3-design.md):
+ * Phase 3 tests (see docs/integration-plan.md and docs/architecture.md DC-4):
  *
  *   1. Extension activates without throwing.
  *   2. paintbox.imageEditor opens a .png via vscode.openWith without throwing
@@ -308,7 +308,7 @@ suite('Paintbox Phase 3 — Open File: Read Bytes → Webview', () => {
     // ---------- Test 4c: activation-time bundle integrity check ----------
 
     test('4c — activation verifies the patched miniPaint bundle artifact', async () => {
-        // Phase 4 contract (.orchestrator/phase4-design.md §8 + override Q1):
+        // Phase 4 contract (docs/architecture.md DC-2):
         // activate() calls verifyPatchedBundle(extensionPath); it MUST throw
         // if the artifact is missing or corrupt. The artifact is generated
         // by `npm run compile` (chained via scripts/patch-bundle.js).
