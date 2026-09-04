@@ -621,18 +621,23 @@ export class PaintboxEditorProvider
             // Post requestSave AFTER the pending entry exists, so the shim's
             // synchronous reply (in tests) or asynchronous reply (in production
             // miniPaint) can find the entry.
-            const post = panel.webview.postMessage({
+            // Delivery can fail two ways — a synchronous throw from the
+            // `webview` getter on an already-disposed panel, and a rejection
+            // if it is disposed mid-flight. `_postIfAlive` folds both into a
+            // false return (DC-11). Either way the pending entry MUST be
+            // cancelled, or it hangs to the 30s timeout and then rejects with
+            // nothing listening.
+            void this._postIfAlive(panel, {
                 type: 'requestSave',
                 requestId,
                 format,
                 filename: path.basename(destination.fsPath),
-            });
-            // VS Code's postMessage returns a Thenable<boolean>. If the panel
-            // is disposed mid-flight, the thenable rejects.
-            Promise.resolve(post).then(undefined, (err: unknown) => {
-                this._correlator.cancel(requestId, new Error(
-                    `Paintbox: failed to message webview — ${err instanceof Error ? err.message : String(err)}`
-                ));
+            }).then((delivered) => {
+                if (!delivered) {
+                    this._correlator.cancel(requestId, new Error(
+                        'Paintbox: failed to message webview — the editor was closed.'
+                    ));
+                }
             });
 
             bytes = await bytesPromise;
@@ -656,9 +661,11 @@ export class PaintboxEditorProvider
         if (destination.toString() === uriKey) {
             this._dirtyEpochByUri.delete(uriKey);
             // Tell the shim to reset its `pbDirtyDispatched` gate so the
-            // next edit re-fires `dirty`.
-            panel.webview.postMessage({ type: 'saved', requestId })
-                .then(undefined, () => { /* best-effort */ });
+            // next edit re-fires `dirty`. Fire-and-forget through the DC-11
+            // guard: the bytes are already on disk, so an editor that closed
+            // mid-save must not turn a successful write into
+            // "Save failed: Webview is disposed".
+            void this._postIfAlive(panel, { type: 'saved', requestId });
         }
     }
 

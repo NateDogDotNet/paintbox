@@ -412,8 +412,21 @@ and a mid-flight rejection, and returns `false` when the panel was gone. Callers
 use that to tell "the editor closed" apart from a real failure — a closed editor
 needs no load message and no `saved` ping, and neither is worth a toast.
 
-Covered by test `5g`, which replaces the panel's `webview` with a throwing
-getter and asserts revert both resolves and stays silent.
+The `requestSave` post in `_writeViaWebview` goes through it too. That one has
+no `await` before it, so the race above cannot reach it — but a failed delivery
+must still cancel the correlator entry, or the entry hangs to its 30 s timeout
+and then rejects with nothing listening. The old code only handled the
+asynchronous rejection, not the synchronous throw.
+
+Covered by two tests, both of which replace the panel's `webview` with a
+throwing getter:
+
+- **`5g`** — revert resolves and stays silent.
+- **`5h`** — the editor closes *after* the bytes arrive and the disk write
+  lands. `saveCustomDocument` must still resolve. Rejecting there reports
+  `Save failed: Webview is disposed` for a save that actually succeeded, which
+  is the worst shape this bug takes: the file is correct on disk and the user
+  is told it is not.
 
 ### Test strategy
 

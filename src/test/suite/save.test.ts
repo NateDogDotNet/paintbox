@@ -682,6 +682,56 @@ suite('Paintbox Phase 5 — Save (host writes bytes to disk)', () => {
         }
     });
 
+    // ---- Test 5h — a save that lands, then the editor closes -------------
+
+    test('5h — saveCustomDocument resolves when the editor closes after the write', async function () {
+        this.timeout(15_000);
+        const h = await makeHarness(FIXTURE_1x1_PNG, 'save-then-close.png');
+        try {
+            const webviewBytes = await fs.promises.readFile(FIXTURE_2x2_PNG);
+            const webviewSha = sha256(webviewBytes);
+
+            h.interceptNextRequestSave((requestId) => {
+                // The user closes the editor while miniPaint encodes. The
+                // provider captured `panel` before its awaits, so its handle
+                // is dead from here on even though `_webviewByUri` has since
+                // been cleaned up by onDidDispose.
+                Object.defineProperty(h.panel, 'webview', {
+                    configurable: true,
+                    get() { throw new Error('Webview is disposed'); },
+                });
+                Promise.resolve(h.messageHandler({
+                    type: 'saveResult',
+                    requestId,
+                    bytes: Array.from(webviewBytes),
+                    format: 'PNG',
+                    filename: 'save-then-close.png',
+                    mime: 'image/png',
+                })).catch(() => undefined);
+            });
+
+            // Must RESOLVE. The bytes arrived and the disk write succeeded;
+            // only the trailing 'saved' ping to a shim that no longer exists
+            // can fail, and that is not a save failure. Rejecting here makes
+            // VS Code show "Save failed: Webview is disposed" for a save that
+            // actually worked, and the user reasonably re-saves or panics.
+            await h.provider.saveCustomDocument(
+                h.document,
+                new vscode.CancellationTokenSource().token
+            );
+
+            const onDiskSha = sha256(await fs.promises.readFile(h.document.uri.fsPath));
+            assert.strictEqual(
+                onDiskSha,
+                webviewSha,
+                'the write must have landed even though the editor closed mid-save'
+            );
+        } finally {
+            await h.cleanup();
+        }
+    });
+
+
 
 });
 
