@@ -49,9 +49,16 @@ filesystem. Details and a sequence diagram are in [`docs/architecture.md`](docs/
 
 ## Status
 
-**Scaffolded — not yet functional.** The extension skeleton compiles; the editor
-integration is not implemented. See [`docs/integration-plan.md`](docs/integration-plan.md)
-for the phased build-out.
+**v0.1.0 — the round-trip works.** Open an image, edit it, hit Save, and the file on the
+server's filesystem updates. Phases 1 through 7a of
+[`docs/integration-plan.md`](docs/integration-plan.md) are done: miniPaint vendored, the
+custom editor registered, bytes flowing into the webview on open, the save hook patched,
+the host-side write closing the loop, Save As with cross-format conversion, and packaging.
+[`CHANGELOG.md`](CHANGELOG.md) lists what landed in each phase.
+
+Not on Open VSX yet — build the VSIX yourself (see [Build a VSIX](#build-a-vsix)) and
+install it. Two image formats are deliberately out of scope; see
+[Known limitations](#known-limitations).
 
 ## Development
 
